@@ -1,0 +1,350 @@
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Threading;
+using NUnit.Framework;
+using UnityEngine;
+using UnityEngine.EventSystems;
+using UnityEngine.TestTools;
+using UnityEngine.UI;
+
+namespace SleepyStudios.LoopScroll.Tests
+{
+    public sealed class LoopScrollPlayModeTests
+    {
+        private GameObject canvas;
+        private LoopScrollView list;
+        private ScrollRect scroll;
+        private LoopCell template;
+        private readonly List<string> items = new List<string>();
+        private static readonly Func<string, string> KeySelector = value => value;
+        private static readonly Action<Image, string, CellBindContext> Bind = (cell, value, context) => cell.color = Color.white;
+
+        private void Create(LoopLayout mode = LoopLayout.Vertical, bool dynamic = false, int prewarm = 40)
+        {
+            canvas = new GameObject("LoopTestCanvas", typeof(RectTransform), typeof(Canvas));
+            canvas.GetComponent<Canvas>().renderMode = RenderMode.ScreenSpaceOverlay;
+            var root = new GameObject("List", typeof(RectTransform), typeof(Image), typeof(ScrollRect));
+            root.transform.SetParent(canvas.transform, false); root.GetComponent<RectTransform>().sizeDelta = new Vector2(300, 200);
+            scroll = root.GetComponent<ScrollRect>(); scroll.inertia = false;
+            var viewport = new GameObject("Viewport", typeof(RectTransform), typeof(Image), typeof(RectMask2D)).GetComponent<RectTransform>();
+            viewport.SetParent(root.transform, false); viewport.sizeDelta = new Vector2(300, 200);
+            var content = new GameObject("Content", typeof(RectTransform)).GetComponent<RectTransform>(); content.SetParent(viewport, false);
+            var cell = new GameObject("Template", typeof(RectTransform), typeof(Image), typeof(LayoutElement), typeof(LoopCell));
+            cell.transform.SetParent(root.transform, false); cell.SetActive(false); template = cell.GetComponent<LoopCell>();
+            scroll.viewport = viewport; scroll.content = content;
+            list = root.AddComponent<LoopScrollView>();
+            list.Configure(scroll, new[] { new LoopCellPrefab { Type = 0, Prefab = template, Prewarm = prewarm } }, mode, new Vector2(100, 40), dynamic);
+        }
+        private void Populate(int count)
+        { items.Clear(); for (var i = 0; i < count; i++) items.Add("item:" + i); }
+        private void Submit(ReloadOptions options = default) { list.SetData(items, Bind, null, KeySelector, options); }
+        [TearDown]
+        public void Cleanup() { if (canvas != null) UnityEngine.Object.DestroyImmediate(canvas); items.Clear(); }
+
+        [UnityTest]
+        public IEnumerator HundredThousandItemsRemainBoundedAndReuseWarmedPool()
+        {
+            Create(); Populate(100000); Submit(); yield return null;
+            Assert.That(list.ActiveCellCount, Is.LessThan(20)); var created = list.CreatedCellCount;
+            for (var i = 0; i < 100; i++) { list.ScrollTo(i * 987); yield return null; }
+            Assert.That(list.CreatedCellCount, Is.EqualTo(created));
+            Assert.That(list.VisibleRange.First, Is.GreaterThan(90000));
+        }
+        [UnityTest]
+        public IEnumerator HorizontalScrollAndAlignmentsUseActualViewport()
+        {
+            Create(LoopLayout.Horizontal); Populate(100); Submit(); yield return null;
+            list.ScrollTo(50, ScrollAlignment.Start); Assert.That(list.Offset, Is.EqualTo(5000).Within(1));
+            list.ScrollTo(50, ScrollAlignment.Center); Assert.That(list.Offset, Is.EqualTo(4900).Within(1));
+            list.ScrollTo(50, ScrollAlignment.End, new ScrollAnimation(.05f)); yield return new WaitForSecondsRealtime(.1f);
+            Assert.That(list.Offset, Is.EqualTo(4800).Within(1));
+            list.ScrollTo(99, ScrollAlignment.Start); Assert.That(list.Offset, Is.EqualTo(list.MaxOffset).Within(1));
+        }
+        [UnityTest]
+        public IEnumerator GridResizeReflowsColumnsAndRetainsAnchor()
+        {
+            Create(LoopLayout.VerticalGrid); Populate(100); Submit(); yield return null;
+            list.ScrollTo(30); var key = list.GetItemKey(list.VisibleRange.First);
+            scroll.viewport.sizeDelta = new Vector2(200, 200); yield return null; yield return null;
+            Assert.That(list.VisibleRange.First, Is.EqualTo(30));
+            Assert.That(list.GetItemKey(list.VisibleRange.First), Is.EqualTo(key));
+            Assert.That(list.GetVisibleCell(31).RectTransform.anchoredPosition.x, Is.EqualTo(100).Within(1));
+        }
+        [UnityTest]
+        public IEnumerator ZeroInactiveSubmissionAndReenableBuildCells()
+        {
+            Create(); Populate(0); Submit(); yield return null; Assert.That(list.ActiveCellCount, Is.Zero);
+            list.gameObject.SetActive(false); Populate(20); list.ReloadData();
+            Assert.That(list.ActiveCellCount, Is.Zero); list.gameObject.SetActive(true); yield return null; yield return null;
+            Assert.That(list.ActiveCellCount, Is.GreaterThan(0));
+            items.Clear(); list.ReloadData(); Assert.That(list.ActiveCellCount, Is.Zero);
+            Populate(30); list.ReloadData(); yield return null; Assert.That(list.ActiveCellCount, Is.GreaterThan(0));
+        }
+        [UnityTest]
+        public IEnumerator ComponentAwakeCompletesBeforeBindingAnInactivePrefab()
+        {
+            Create(); template.gameObject.AddComponent<AwakeInitializedCell>(); Populate(30);
+            list.SetData<string, AwakeInitializedCell>(items, (cell, item, context) => Assert.That(cell.Initialized, Is.True), null, KeySelector);
+            yield return null; Assert.That(list.ActiveCellCount, Is.GreaterThan(0));
+        }
+        [UnityTest]
+        public IEnumerator PrependRemoveReplaceMoveAndReloadPreserveStableIdentity()
+        {
+            Create(); Populate(100); Submit(); yield return null;
+            list.ScrollToOffset(807); var key = list.GetItemKey(list.VisibleRange.First);
+            items.Insert(0, "history"); list.Prepend(1);
+            Assert.That(list.Offset, Is.EqualTo(847).Within(1)); Assert.That(list.GetItemKey(list.VisibleRange.First), Is.EqualTo(key));
+            items.RemoveAt(0); list.ApplyChanges(new[] { LoopListChange.Remove(0) }); Assert.That(list.Offset, Is.EqualTo(807).Within(1));
+            var moved = items[0]; items.RemoveAt(0); items.Insert(50, moved); list.ApplyChanges(new[] { LoopListChange.Move(0, 50) });
+            Assert.That(list.GetItemKey(list.VisibleRange.First), Is.EqualTo(key));
+            var anchor = list.VisibleRange.First; items.RemoveAt(anchor); list.ApplyChanges(new[] { LoopListChange.Remove(anchor) });
+            Assert.That(list.Offset % 40, Is.EqualTo(7).Within(1));
+            items[0] = "replacement"; list.ApplyChanges(new[] { LoopListChange.Replace(0) });
+            list.ReloadData(new ReloadOptions(ScrollAnchorPolicy.KeepPosition)); yield return null;
+            Assert.That(list.Offset % 40, Is.EqualTo(7).Within(1));
+        }
+        [UnityTest]
+        public IEnumerator PrependDuringDragRebasesNativePointerWithoutJump()
+        {
+            Create(); Populate(100); Submit(); yield return null; list.ScrollTo(20);
+            var events = new GameObject("PointerEvents", typeof(EventSystem));
+            try
+            {
+                var data = new PointerEventData(events.GetComponent<EventSystem>()) { button = PointerEventData.InputButton.Left, position = new Vector2(200, 200) };
+                scroll.OnBeginDrag(data); list.OnBeginDrag(data);
+                items.Insert(0, "history"); list.Prepend(1); Assert.That(list.Offset, Is.EqualTo(840).Within(1));
+                data.position += new Vector2(0, 40); data.delta = new Vector2(0, 40); scroll.OnDrag(data);
+                Assert.That(list.Offset, Is.EqualTo(880).Within(1)); scroll.OnEndDrag(data); list.OnEndDrag(data);
+            }
+            finally { UnityEngine.Object.DestroyImmediate(events); }
+        }
+        [UnityTest]
+        public IEnumerator UnbindCannotReenterSnapshotUpdate()
+        {
+            Create(); Populate(30); var rejected = 0;
+            list.SetData<string, Image>(items, Bind, (cell, context) => { Assert.Throws<InvalidOperationException>(() => list.ReloadData()); rejected++; }, KeySelector);
+            yield return null; items.Insert(0, "new"); list.Prepend(1);
+            Assert.That(rejected, Is.GreaterThan(0)); Assert.That(list.Count, Is.EqualTo(31));
+        }
+        [UnityTest]
+        public IEnumerator InvalidBatchAndDuplicateKeyDoNotDestroyExistingDisplay()
+        {
+            Create(); Populate(50); Submit(); yield return null;
+            var context = list.GetVisibleCell(0).Context;
+            Assert.Throws<InvalidOperationException>(() => list.ApplyChanges(new[] { LoopListChange.Insert(0) }));
+            Assert.That(context.IsCurrent, Is.True); var count = list.Count;
+            items[1] = items[0]; Assert.Throws<InvalidOperationException>(() => list.ReloadData());
+            Assert.That(list.Count, Is.EqualTo(count)); Assert.That(context.IsCurrent, Is.True);
+        }
+        [UnityTest]
+        public IEnumerator AsyncRecycleCancelsTokenAndInvalidatesUncooperativeContinuation()
+        {
+            Create(); Populate(100); Submit(); yield return null;
+            var cell = list.GetVisibleCell(0); var old = cell.Context;
+            long firstTokenBytes, secondTokenBytes; CancellationToken token, sameToken;
+            using (var probe = new GcAllocationProbe())
+            {
+                probe.Begin(); token = old.CancellationToken; firstTokenBytes = probe.End();
+                probe.Begin(); sameToken = old.CancellationToken; secondTokenBytes = probe.End();
+            }
+            Assert.That(firstTokenBytes, Is.GreaterThan(0)); Assert.That(secondTokenBytes, Is.Zero); Assert.That(sameToken, Is.EqualTo(token));
+            Debug.Log($"SleepyLoopScroll token allocation: firstBytes={firstTokenBytes}, repeatedBytes={secondTokenBytes}");
+            list.ScrollTo(80); yield return null;
+            Assert.That(token.IsCancellationRequested, Is.True); Assert.That(old.IsCurrent, Is.False);
+            Assert.That(old.CancellationToken.IsCancellationRequested, Is.True);
+            var wrote = false; Action lateResult = () => { if (old.IsCurrent) { cell.GetComponent<Image>().color = Color.red; wrote = true; } };
+            lateResult(); Assert.That(wrote, Is.False);
+            var current = list.GetVisibleCell(80).Context;
+            list.RefreshVisible(); Assert.That(current.IsCurrent, Is.False);
+            current = list.GetVisibleCell(80).Context; list.gameObject.SetActive(false); Assert.That(current.IsCurrent, Is.False);
+        }
+        [UnityTest]
+        public IEnumerator DynamicHeightChangesAndCrossAxisResizeKeepAnchor()
+        {
+            Create(dynamic: true); Populate(100);
+            list.SetData<string, LayoutElement>(items, (cell, value, context) => { cell.preferredHeight = 60; }, null, KeySelector);
+            yield return null; yield return null; list.ScrollTo(50); yield return null; yield return null;
+            var key = list.GetItemKey(list.VisibleRange.First); var cell = list.GetVisibleCell(list.VisibleRange.First);
+            cell.GetComponent<LayoutElement>().preferredHeight = 120; list.InvalidateCellSize(cell.Context.Index);
+            yield return null; yield return null;
+            Assert.That(cell.RectTransform.rect.height, Is.EqualTo(120).Within(1));
+            Assert.That(list.GetItemKey(list.VisibleRange.First), Is.EqualTo(key));
+            scroll.viewport.sizeDelta = new Vector2(200, 200); yield return null; yield return null;
+            Assert.That(list.GetItemKey(list.VisibleRange.First), Is.EqualTo(key));
+        }
+        [UnityTest]
+        public IEnumerator DynamicCenterAlignmentIsCorrectAfterFirstMeasurement()
+        {
+            Create(dynamic: true); Populate(100);
+            list.SetData<string, LayoutElement>(items, (cell, value, context) => cell.preferredHeight = 80, null, KeySelector);
+            yield return null; yield return null; list.ScrollTo(50, ScrollAlignment.Center); yield return null; yield return null; yield return null;
+            var cell = list.GetVisibleCell(50);
+            Assert.That(cell.RectTransform.anchoredPosition.y + list.Offset, Is.EqualTo(-60).Within(1));
+        }
+        [UnityTest]
+        public IEnumerator ReloadTargetUsesMeasuredDynamicAlignment()
+        {
+            Create(dynamic: true); Populate(100);
+            list.SetData<string, LayoutElement>(items, (cell, value, context) => cell.preferredHeight = 80, null, KeySelector, new ReloadOptions(50, ScrollAlignment.Center));
+            yield return null; yield return null; yield return null;
+            var cell = list.GetVisibleCell(50);
+            Assert.That(cell.RectTransform.anchoredPosition.y + list.Offset, Is.EqualTo(-60).Within(1));
+        }
+        [UnityTest]
+        public IEnumerator ChatInitialBottomHistoryPrependUnreadAndFollow()
+        {
+            Create(); var chat = list.gameObject.AddComponent<LoopChatController>(); Populate(100); Submit(); yield return null; yield return null;
+            Assert.That(list.DistanceToEnd, Is.LessThanOrEqualTo(1));
+            list.ScrollTo(20); items.Insert(0, "history"); chat.PrependHistory(1);
+            Assert.That(list.GetItemKey(list.VisibleRange.First), Is.EqualTo("item:20"));
+            items.Add("new"); chat.AppendMessages(1); Assert.That(chat.UnreadCount, Is.EqualTo(1));
+            chat.JumpToLatest(); Assert.That(chat.UnreadCount, Is.Zero);
+            items.Add("new2"); chat.AppendMessages(1); yield return null;
+            Assert.That(list.DistanceToEnd, Is.LessThanOrEqualTo(1));
+        }
+        [UnityTest]
+        public IEnumerator PagingDeduplicatesAndRequiresExplicitRetry()
+        {
+            Create(); Populate(20); Submit(); var paging = list.gameObject.AddComponent<LoopPagingTrigger>();
+            paging.Configure(true, false); var requests = 0; paging.LoadRequested += boundary => requests++;
+            paging.Evaluate(); paging.Evaluate(); Assert.That(requests, Is.EqualTo(1));
+            paging.Fail(PagingBoundary.Start); paging.Evaluate(); Assert.That(requests, Is.EqualTo(1));
+            paging.Retry(PagingBoundary.Start); Assert.That(requests, Is.EqualTo(2));
+            paging.Complete(PagingBoundary.Start, false); paging.Evaluate(); Assert.That(requests, Is.EqualTo(2));
+            Assert.That(paging.StartState, Is.EqualTo(PagingState.Completed)); yield return null;
+        }
+        [UnityTest]
+        public IEnumerator SelectionSurvivesRefreshAndClearsDeletedKeys()
+        {
+            Create(); Populate(40); Submit(); var selection = list.gameObject.AddComponent<LoopSelectionController>();
+            selection.SetSelected("item:2", true); list.RefreshVisible(); Assert.That(selection.IsSelected("item:2"), Is.True);
+            selection.SetSelected("item:3", true); Assert.That(selection.IsSelected("item:2"), Is.False);
+            selection.MultiSelect = true; selection.SetSelected("item:4", true); Assert.That(selection.SelectedKeys.Count, Is.EqualTo(2));
+            items.RemoveAt(3); list.ApplyChanges(new[] { LoopListChange.Remove(3) }); Assert.That(selection.IsSelected("item:3"), Is.False); yield return null;
+        }
+        [UnityTest]
+        public IEnumerator CarouselZeroOneTwoManyAndRepeatedRecenter()
+        {
+            Create(LoopLayout.Horizontal); var carousel = list.gameObject.AddComponent<LoopCarouselController>(); carousel.Configure(300, 0, 0);
+            Populate(0); Submit(); Assert.That(carousel.CurrentPage, Is.EqualTo(-1));
+            Populate(1); list.ReloadData(); yield return null; Assert.That(list.IsLooping, Is.False);
+            Populate(2); list.ReloadData(); yield return null; yield return null; Assert.That(list.IsLooping, Is.True);
+            for (var i = 0; i < 6; i++) { carousel.Next(); yield return null; yield return null; }
+            Assert.That(carousel.CurrentPage, Is.EqualTo(0)); Assert.That(Mathf.Abs(list.Offset), Is.LessThan(1000));
+            Populate(5); list.ReloadData(); yield return null; carousel.SetPage(4); yield return null; yield return null;
+            Assert.That(carousel.CurrentPage, Is.EqualTo(4)); carousel.Previous(); yield return null; yield return null;
+            Assert.That(carousel.CurrentPage, Is.EqualTo(3));
+        }
+        [UnityTest]
+        public IEnumerator CarouselHighSpeedReverseDragSnapsAndAutoPlayResumes()
+        {
+            Create(LoopLayout.Horizontal); var carousel = list.gameObject.AddComponent<LoopCarouselController>();
+            carousel.Configure(300, 0, 0); Populate(5); Submit(); yield return null; yield return null;
+            var eventObject = new GameObject("DragEvents", typeof(EventSystem));
+            try
+            {
+                var data = new PointerEventData(eventObject.GetComponent<EventSystem>()) { button = PointerEventData.InputButton.Left, position = new Vector2(100, 100) };
+                list.OnBeginDrag(data); scroll.OnBeginDrag(data);
+                data.position = new Vector2(-10400, 100); data.delta = new Vector2(-10500, 0); scroll.OnDrag(data);
+                Assert.That(list.Offset, Is.GreaterThan(10000));
+                scroll.OnEndDrag(data); list.OnEndDrag(data); scroll.StopMovement(); yield return null; yield return null;
+                Assert.That(carousel.CurrentPage, Is.EqualTo(0)); Assert.That(Mathf.Abs(list.Offset), Is.LessThan(1500));
+                list.OnBeginDrag(data); scroll.OnBeginDrag(data); data.position = new Vector2(-7400, 100); data.delta = new Vector2(3000, 0); scroll.OnDrag(data);
+                scroll.OnEndDrag(data); list.OnEndDrag(data); scroll.StopMovement(); yield return null; yield return null;
+                Assert.That(carousel.CurrentPage, Is.EqualTo(0));
+                carousel.Configure(300, .05f, 0); yield return new WaitForSecondsRealtime(.08f); yield return null;
+                Assert.That(carousel.CurrentPage, Is.Not.EqualTo(0));
+            }
+            finally { UnityEngine.Object.DestroyImmediate(eventObject); }
+        }
+        [UnityTest]
+        public IEnumerator PagingBoundariesHaveIndependentLoadingAndCompletion()
+        {
+            Create(); Populate(1); Submit(); var paging = list.gameObject.AddComponent<LoopPagingTrigger>(); paging.Configure(true, true);
+            var starts = 0; var ends = 0; paging.LoadRequested += boundary => { if (boundary == PagingBoundary.Start) starts++; else ends++; };
+            paging.Evaluate(); paging.Evaluate(); Assert.That(starts, Is.EqualTo(1)); Assert.That(ends, Is.EqualTo(1));
+            paging.Fail(PagingBoundary.Start); paging.Complete(PagingBoundary.End, false);
+            paging.Retry(PagingBoundary.Start); Assert.That(starts, Is.EqualTo(2)); Assert.That(ends, Is.EqualTo(1));
+            Assert.That(paging.EndState, Is.EqualTo(PagingState.Completed)); yield return null;
+        }
+        [UnityTest]
+        public IEnumerator ScrollbarControlsAndReflectsHorizontalPosition()
+        {
+            Create(LoopLayout.Horizontal); var bar = new GameObject("Scrollbar", typeof(RectTransform), typeof(Scrollbar)).GetComponent<Scrollbar>();
+            bar.transform.SetParent(canvas.transform); scroll.horizontalScrollbar = bar;
+            Populate(100); Submit(); yield return null; list.ScrollTo(50); yield return null; yield return null;
+            Assert.That(bar.value, Is.EqualTo(5000f / 9700).Within(.001f));
+            bar.value = .5f; yield return null; yield return null; Assert.That(list.Offset, Is.EqualTo(4850).Within(1));
+        }
+        [UnityTest]
+        public IEnumerator ZeroViewportRecoversAndMissingComponentIsSafelyRejected()
+        {
+            Create(); scroll.viewport.sizeDelta = Vector2.zero; Populate(20); Submit(); yield return null;
+            Assert.That(list.ActiveCellCount, Is.Zero); scroll.viewport.sizeDelta = new Vector2(300, 200); yield return null; yield return null;
+            Assert.That(list.ActiveCellCount, Is.GreaterThan(0));
+            items.Clear(); list.ReloadData(); Populate(1);
+            LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex("Cell 绑定失败.*"));
+            list.SetData<string, Text>(items, (cell, item, context) => { }, null, KeySelector);
+            Assert.That(list.ActiveCellCount, Is.Zero);
+        }
+        [UnityTest]
+        public IEnumerator NestedRouterTransfersOneGestureToParentAtBoundary()
+        {
+            Create(); Populate(50); Submit(); yield return null;
+            var parentObject = new GameObject("ParentScroll", typeof(RectTransform), typeof(ScrollRect)); parentObject.transform.SetParent(canvas.transform);
+            var parent = parentObject.GetComponent<ScrollRect>(); parent.viewport = scroll.viewport; parent.content = scroll.content;
+            var router = scroll.viewport.gameObject.AddComponent<NestedScrollRouter>(); router.Configure(scroll, parent);
+            var eventObject = new GameObject("EventSystem", typeof(EventSystem));
+            try
+            {
+                var data = new PointerEventData(eventObject.GetComponent<EventSystem>()) { button = PointerEventData.InputButton.Left, delta = new Vector2(0, -20) };
+                router.OnInitializePotentialDrag(data); router.OnBeginDrag(data); Assert.That(list.IsDragging, Is.True);
+                router.OnDrag(data); Assert.That(list.IsDragging, Is.False); router.OnEndDrag(data); Assert.That(list.IsDragging, Is.False);
+            }
+            finally { UnityEngine.Object.DestroyImmediate(eventObject); }
+        }
+        [UnityTest]
+        public IEnumerator MultipleTypesUseSeparatePoolsAndChangeTypesOnReplace()
+        {
+            Create();
+            var root = list.gameObject; UnityEngine.Object.DestroyImmediate(list);
+            list = root.AddComponent<LoopScrollView>();
+            list.Configure(scroll, new[] { new LoopCellPrefab { Type = 0, Prefab = template, Prewarm = 20 }, new LoopCellPrefab { Type = 1, Prefab = template, Prewarm = 20 } }, LoopLayout.Vertical, new Vector2(100, 40));
+            var source = new AlternatingSource(); list.SetDataSource(source); yield return null;
+            Assert.That(list.GetVisibleCell(0).name, Is.Not.Null); var old = list.GetVisibleCell(0).Context;
+            source.Flip = true; list.ApplyChanges(new[] { LoopListChange.Replace(0, source.Count) });
+            Assert.That(old.IsCurrent, Is.False); var created = list.CreatedCellCount;
+            list.ScrollTo(40); yield return null; Assert.That(list.CreatedCellCount, Is.EqualTo(created));
+        }
+        private sealed class AlternatingSource : ILoopDataSource
+        {
+            public bool Flip; public int Count => 100; public bool HasStableKeys => true;
+            public string GetItemKey(int index) => index.ToString(); public int GetCellType(int index) => (index + (Flip ? 1 : 0)) % 2;
+            public float GetEstimatedSize(int index, float crossAxisSize) => 40;
+            public void BindCell(LoopCell cell, int index, CellBindContext context) { }
+            public void UnbindCell(LoopCell cell, CellBindContext context) { }
+        }
+        [UnityTest]
+        public IEnumerator WarmSynchronousScrollingSixtySecondsAllocatesNoPluginMemory()
+        {
+            Create(prewarm: 50); Populate(100000); Submit(); yield return null;
+            for (var i = 0; i < 100; i++) list.ScrollTo(i * 500);
+            yield return null; var created = list.CreatedCellCount;
+            var until = Time.realtimeSinceStartup + 60; var step = 0; long totalAllocated = 0;
+            using (var probe = new GcAllocationProbe())
+            {
+            while (Time.realtimeSinceStartup < until)
+            {
+                probe.Begin();
+                list.ScrollTo((step++ * 37) % 99000);
+                totalAllocated += probe.End();
+                yield return null;
+            }
+            }
+            Assert.That(totalAllocated, Is.Zero, "同步 ScrollTo/Reconcile 的当前线程内部分配");
+            Assert.That(list.CreatedCellCount, Is.EqualTo(created));
+            Debug.Log($"SleepyLoopScroll 60s synchronous benchmark: calls={step}, managedBytes={totalAllocated}, created={created}");
+        }
+    }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "com.sleepystudios.loop-scroll",
+  "version": "0.1.0",
+  "displayName": "Sleepy Loop Scroll",
+  "description": "Independent uGUI virtual lists, chat, carousel and paging.",
+  "unity": "2022.3",
+  "author": { "name": "Sleepy Studios" },
+  "dependencies": { "com.unity.ugui": "1.0.0" },
+  "samples": [
+    { "displayName": "Basic Lists", "description": "Vertical, horizontal and grid lists.", "path": "Samples~/Basic" },
+    { "displayName": "Multiple Cell Types", "description": "Per-type pools and selection.", "path": "Samples~/MultiType" },
+    { "displayName": "Dynamic Chat", "description": "Dynamic message heights and history anchors.", "path": "Samples~/Chat" },
+    { "displayName": "Carousel and Paging", "description": "Looping pages, boundary requests and nested scrolling.", "path": "Samples~/CarouselPaging" }
+  ]
+}

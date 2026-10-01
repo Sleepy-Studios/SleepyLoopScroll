@@ -1,0 +1,632 @@
+using System;
+using System.Collections.Generic;
+using SleepyStudios.LoopScroll.Internal;
+using UnityEngine;
+using UnityEngine.EventSystems;
+using UnityEngine.UI;
+
+namespace SleepyStudios.LoopScroll
+{
+    [DisallowMultipleComponent, RequireComponent(typeof(ScrollRect))]
+    [DefaultExecutionOrder(100)]
+    public sealed class LoopScrollView : MonoBehaviour, IBeginDragHandler, IEndDragHandler
+    {
+        [SerializeField] private ScrollRect scrollRect;
+        [SerializeField] private LoopLayout layout;
+        [SerializeField] private Vector2 cellSize = new Vector2(100, 48);
+        [SerializeField] private Vector2 spacing;
+        [SerializeField] private RectOffset padding = new RectOffset();
+        [SerializeField, Min(0)] private float overscan = 96;
+        [SerializeField] private bool dynamicSize;
+        [SerializeField] private List<LoopCellPrefab> cellPrefabs = new List<LoopCellPrefab>();
+
+        private sealed class Pool
+        {
+            public LoopCell Prefab;
+            public readonly Stack<LoopCell> Free = new Stack<LoopCell>();
+        }
+        private readonly Dictionary<int, Pool> pools = new Dictionary<int, Pool>();
+        private readonly Dictionary<int, LoopCell> active = new Dictionary<int, LoopCell>();
+        private readonly List<int> recycleSlots = new List<int>(64);
+        private readonly HashSet<int> invalidSizes = new HashSet<int>();
+        private readonly Dictionary<string, float> measuredSizes = new Dictionary<string, float>(StringComparer.Ordinal);
+        private readonly FenwickTree sizes = new FenwickTree();
+        private Dictionary<string, int> indices = new Dictionary<string, int>(StringComparer.Ordinal);
+        private string[] keys = Array.Empty<string>();
+        private int[] types = Array.Empty<int>();
+        private ILoopDataSource source;
+        private RectTransform poolRoot;
+        private Vector2 viewportSize;
+        private bool initialized;
+        private bool dirty = true;
+        private bool reconciling;
+        private bool committing;
+        private bool handlingCellCallbacks;
+        private PointerEventData currentDrag;
+        private bool refreshPending;
+        private bool looping;
+        private float loopPageSize;
+        private float animationFrom;
+        private float animationTo;
+        private float animationTime;
+        private float animationDuration;
+        private Action<LoopCell, CellBindContext> cachedClick;
+        private ReloadOptions? pendingOptions;
+        private ScrollRect.MovementType savedMovement;
+        private Scrollbar savedHorizontalBar;
+        private Scrollbar savedVerticalBar;
+        private string alignedKey;
+        private ScrollAlignment alignedAlignment;
+        private bool followEndDuringMeasurement;
+
+        public event Action<LoopCell, CellBindContext> CellBound;
+        public event Action<LoopCell, CellBindContext> CellUnbound;
+        public event Action<LoopCell, CellBindContext> CellClicked;
+        public event Action DataChanged;
+        public event Action ScrollPositionChanged;
+        public event Action DragStarted;
+        public event Action DragEnded;
+        public ScrollRect ScrollRect => scrollRect != null ? scrollRect : (scrollRect = GetComponent<ScrollRect>());
+        public bool IsVertical => layout == LoopLayout.Vertical || layout == LoopLayout.VerticalGrid;
+        public bool IsGrid => layout == LoopLayout.VerticalGrid || layout == LoopLayout.HorizontalGrid;
+        public bool HasStableKeys => source != null && source.HasStableKeys;
+        public bool IsDragging { get; private set; }
+        public bool IsAnimating => animationDuration > 0;
+        public bool IsLooping => looping;
+        public int Count => keys.Length;
+        public int ActiveCellCount => active.Count;
+        public int CreatedCellCount { get; private set; }
+        public VisibleRange VisibleRange { get; private set; } = VisibleRange.Empty;
+        public float ViewportLength => IsVertical ? viewportSize.y : viewportSize.x;
+        public float ContentLength => IsGrid ? StartPadding + EndPadding + Bands * Stride - (Bands > 0 ? AxisSpacing : 0)
+            : StartPadding + EndPadding + sizes.Total - (Count > 0 ? AxisSpacing : 0);
+        public float MaxOffset => Mathf.Max(0, ContentLength - ViewportLength);
+        public float Offset => ScrollRect.content == null ? 0 : IsVertical ? ScrollRect.content.anchoredPosition.y : -ScrollRect.content.anchoredPosition.x;
+        public float DistanceToStart => Mathf.Max(0, Offset);
+        public float DistanceToEnd => Mathf.Max(0, MaxOffset - Offset);
+        public float DefaultItemSize => IsVertical ? cellSize.y : cellSize.x;
+        private float CrossSize => IsVertical ? viewportSize.x : viewportSize.y;
+        private float AxisSpacing => IsVertical ? spacing.y : spacing.x;
+        private float CrossSpacing => IsVertical ? spacing.x : spacing.y;
+        private float CrossCellSize => IsVertical ? cellSize.x : cellSize.y;
+        private float StartPadding => IsVertical ? padding.top : padding.left;
+        private float EndPadding => IsVertical ? padding.bottom : padding.right;
+        private float CrossStartPadding => IsVertical ? padding.left : padding.top;
+        private float CrossEndPadding => IsVertical ? padding.right : padding.bottom;
+        private float Stride => DefaultItemSize + AxisSpacing;
+        private int Lanes => Mathf.Max(1, Mathf.FloorToInt((CrossSize - CrossStartPadding - CrossEndPadding + CrossSpacing) / (CrossCellSize + CrossSpacing)));
+        private int Bands => (Count + Lanes - 1) / Lanes;
+
+        /// <summary>初始化层级及 Prefab 映射；只能在首次提交数据前调用。</summary>
+        /// <param name="rect">具有 Viewport、Content 的原生 ScrollRect。</param>
+        /// <param name="prefabs">每个类型唯一的 LoopCell Prefab。</param>
+        /// <param name="mode">单轴 List 或规则 Grid。</param>
+        /// <param name="size">固定 Cell 尺寸；动态 List 以主轴分量作为估算值。</param>
+        /// <param name="measureDynamic">是否测量 List 的主轴尺寸；Grid 不支持。</param>
+        public void Configure(ScrollRect rect, IReadOnlyList<LoopCellPrefab> prefabs, LoopLayout mode, Vector2 size, bool measureDynamic = false)
+        {
+            if (initialized) throw new InvalidOperationException("Configure 必须在首次 SetData 前调用。");
+            scrollRect = rect; layout = mode; cellSize = size; dynamicSize = measureDynamic;
+            cellPrefabs.Clear();
+            for (var i = 0; i < prefabs.Count; i++) cellPrefabs.Add(prefabs[i]);
+            ValidateConfiguration();
+        }
+
+        /// <summary>检查必需引用、尺寸、布局冲突和类型映射；不改变场景。</summary>
+        public void ValidateConfiguration()
+        {
+            var rect = ScrollRect;
+            if (rect.content == null || rect.viewport == null) throw new InvalidOperationException("LoopScrollView 需要显式 Viewport 和 Content。");
+            if (rect.content.GetComponent<LayoutGroup>() != null || rect.content.GetComponent<ContentSizeFitter>() != null)
+                throw new InvalidOperationException("Content 不能挂 LayoutGroup 或 ContentSizeFitter；布局组件请放在 Cell 内部。");
+            if (cellSize.x <= 0 || cellSize.y <= 0 || spacing.x < 0 || spacing.y < 0 || !Finite(cellSize.x) || !Finite(cellSize.y))
+                throw new InvalidOperationException("Cell 尺寸必须为有限正数，Spacing 不能为负。");
+            if (dynamicSize && IsGrid) throw new InvalidOperationException("v0.1 Grid 只支持固定 Cell 尺寸。");
+            var seen = new HashSet<int>();
+            for (var i = 0; i < cellPrefabs.Count; i++)
+            {
+                var entry = cellPrefabs[i];
+                if (entry == null || entry.Prefab == null || !seen.Add(entry.Type))
+                    throw new InvalidOperationException("Cell 类型重复或 Prefab 缺失。");
+            }
+            if (seen.Count == 0) throw new InvalidOperationException("至少配置一个 Cell Prefab。");
+        }
+
+        private void Initialize()
+        {
+            if (initialized) return;
+            ValidateConfiguration();
+            cachedClick = HandleClick;
+            poolRoot = new GameObject("LoopCellPool", typeof(RectTransform)).GetComponent<RectTransform>();
+            poolRoot.SetParent(transform, false);
+            poolRoot.gameObject.SetActive(false);
+            for (var i = 0; i < cellPrefabs.Count; i++)
+            {
+                var entry = cellPrefabs[i];
+                var pool = new Pool { Prefab = entry.Prefab };
+                pools.Add(entry.Type, pool);
+                for (var j = 0; j < entry.Prewarm; j++) pool.Free.Push(CreateCell(entry.Type, pool));
+            }
+            ScrollRect.content.anchorMin = ScrollRect.content.anchorMax = new Vector2(0, 1);
+            ScrollRect.content.pivot = new Vector2(0, 1);
+            ScrollRect.vertical = IsVertical;
+            ScrollRect.horizontal = !IsVertical;
+            viewportSize = ScrollRect.viewport.rect.size;
+            ScrollRect.onValueChanged.AddListener(OnScroll);
+            initialized = true;
+        }
+
+        /// <summary>单类型简单绑定；位置 Key 仅在当前快照有效。</summary>
+        /// <typeparam name="TItem">业务数据类型。</typeparam>
+        /// <typeparam name="TCell">Prefab 上的组件类型。</typeparam>
+        /// <param name="items">调用方拥有的数据集合；修改后必须通知列表。</param>
+        /// <param name="bind">同步配置 Cell；异步任务使用 context 隔离。</param>
+        /// <param name="unbind">回收时释放业务资源，可为空。</param>
+        /// <param name="options">重载位置策略，默认回到起点。</param>
+        public void SetData<TItem, TCell>(IReadOnlyList<TItem> items, Action<TCell, TItem, CellBindContext> bind,
+            Action<TCell, CellBindContext> unbind = null, ReloadOptions options = default) where TCell : Component
+        { SetData(items, bind, unbind, null, options); }
+
+        /// <summary>带稳定业务 Key 的简单绑定，支持跨 Reload 的锚点和选择。</summary>
+        /// <typeparam name="TItem">业务数据类型。</typeparam>
+        /// <typeparam name="TCell">Prefab 上的组件类型。</typeparam>
+        /// <param name="items">调用方拥有的集合。</param>
+        /// <param name="bind">绑定回调。</param>
+        /// <param name="unbind">解绑回调，可为空。</param>
+        /// <param name="getItemKey">返回非空、唯一且稳定的 Key；不可每次随机生成。</param>
+        /// <param name="options">重载策略。</param>
+        public void SetData<TItem, TCell>(IReadOnlyList<TItem> items, Action<TCell, TItem, CellBindContext> bind,
+            Action<TCell, CellBindContext> unbind, Func<TItem, string> getItemKey, ReloadOptions options = default) where TCell : Component
+        {
+            if (items == null || bind == null) throw new ArgumentNullException(items == null ? nameof(items) : nameof(bind));
+            SetDataSource(new ListDataSource<TItem, TCell>(items, bind, unbind, getItemKey, DefaultItemSize), options);
+        }
+
+        /// <summary>提交高级数据源并完整重载；可在 inactive 时调用。</summary>
+        /// <param name="dataSource">数据源；其 Count、Key、类型和尺寸必须一致有效。</param>
+        /// <param name="options">锚点及定位策略。</param>
+        public void SetDataSource(ILoopDataSource dataSource, ReloadOptions options = default)
+        {
+            if (dataSource == null) throw new ArgumentNullException(nameof(dataSource));
+            Initialize();
+            Commit(dataSource, options, true);
+        }
+
+        /// <summary>重新读取整个数据源并重新绑定；默认回到起点。</summary>
+        /// <param name="options">锚点与可选目标索引。</param>
+        public void ReloadData(ReloadOptions options = default)
+        { if (source != null) Commit(source, options, false); }
+
+        /// 重新绑定可见项，不改变数量；inactive 时延后到启用。
+        public void RefreshVisible()
+        {
+            if (reconciling || committing || handlingCellCallbacks) throw new InvalidOperationException("Cell 生命周期回调中不能重入刷新。");
+            refreshPending = true; dirty = true; if (isActiveAndEnabled) Reconcile();
+        }
+
+        /// <summary>调用方完成数据修改后提交有序变更，一次刷新。错误批次不改变展示。</summary>
+        /// <param name="changes">按序执行的结构描述，Move 目标是移除后的插入位置。</param>
+        /// <param name="anchorPolicy">默认保持首个可见 Key 和像素偏移。</param>
+        public void ApplyChanges(IReadOnlyList<LoopListChange> changes, ScrollAnchorPolicy anchorPolicy = ScrollAnchorPolicy.KeepFirstVisible)
+        {
+            if (source == null || changes == null) throw new ArgumentNullException(source == null ? nameof(source) : nameof(changes));
+            var count = Count;
+            for (var i = 0; i < changes.Count; i++)
+            {
+                var change = changes[i];
+                if (change.Count <= 0 || change.Index < 0 || change.Index > count ||
+                    (change.Kind != LoopListChangeKind.Insert && change.Count > count - change.Index))
+                    throw new ArgumentOutOfRangeException(nameof(changes), "变更索引或数量越界。");
+                switch (change.Kind)
+                {
+                    case LoopListChangeKind.Insert: count = checked(count + change.Count); break;
+                    case LoopListChangeKind.Remove: count -= change.Count; break;
+                    case LoopListChangeKind.Replace: break;
+                    case LoopListChangeKind.Move:
+                        if (change.Destination < 0 || change.Destination > count - change.Count)
+                            throw new ArgumentOutOfRangeException(nameof(changes), "Move 目标越界。");
+                        break;
+                    default: throw new ArgumentOutOfRangeException(nameof(changes));
+                }
+            }
+            if (count != source.Count) throw new InvalidOperationException("变更批次的最终 Count 与数据源不一致。");
+            Commit(source, new ReloadOptions(anchorPolicy), false);
+        }
+
+        /// <summary>通知已添加到集合末尾的项。</summary>
+        /// <param name="count">追加数量。</param>
+        /// <param name="policy">追加后的锚点策略。</param>
+        public void Append(int count, ScrollAnchorPolicy policy = ScrollAnchorPolicy.KeepFirstVisible)
+        { ApplyChanges(new[] { LoopListChange.Insert(Count, count) }, policy); }
+        /// <summary>通知已添加到集合开头的项。</summary>
+        /// <param name="count">前插数量。</param>
+        /// <param name="policy">默认保持首个可见项。</param>
+        public void Prepend(int count, ScrollAnchorPolicy policy = ScrollAnchorPolicy.KeepFirstVisible)
+        { ApplyChanges(new[] { LoopListChange.Insert(0, count) }, policy); }
+
+        private struct Anchor
+        {
+            public string Key;
+            public int Index;
+            public float Within;
+            public float Position;
+            public string[] OldKeys;
+        }
+        private Anchor CaptureAnchor()
+        {
+            var index = Count > 0 ? IndexAt(Mathf.Max(0, Offset)) : -1;
+            return new Anchor { Key = index >= 0 ? keys[index] : null, Index = index, Position = Offset,
+                Within = index >= 0 ? Offset - ItemStart(index) : 0, OldKeys = keys };
+        }
+        private void Commit(ILoopDataSource nextSource, ReloadOptions options, bool sourceChanged)
+        {
+            if (reconciling || committing || handlingCellCallbacks) throw new InvalidOperationException("Cell 生命周期回调内不能重入结构更新，请在回调结束后提交。");
+            committing = true;
+            try
+            {
+                if (nextSource.Count < 0) throw new InvalidOperationException("Count 不能为负。");
+                if (options.AnchorPolicy == ScrollAnchorPolicy.KeepFirstVisible && !nextSource.HasStableKeys && Count > 0)
+                    throw new InvalidOperationException("保持可见业务项需要稳定 Key selector。");
+                var count = nextSource.Count;
+                var nextKeys = new string[count];
+                var nextTypes = new int[count];
+                var nextSizes = new float[count];
+                var nextIndices = new Dictionary<string, int>(count, StringComparer.Ordinal);
+                // 先构建并验证完整快照，错误不会破坏当前展示。
+                for (var i = 0; i < count; i++)
+                {
+                    var key = nextSource.GetItemKey(i);
+                    var type = nextSource.GetCellType(i);
+                    var estimate = nextSource.GetEstimatedSize(i, CrossSize);
+                    if (string.IsNullOrEmpty(key) || nextIndices.ContainsKey(key)) throw new InvalidOperationException($"Key 为空或重复：index={i}, key={key}");
+                    if (!pools.ContainsKey(type)) throw new InvalidOperationException($"未配置 Cell 类型：index={i}, type={type}");
+                    if (!Finite(estimate) || estimate <= 0) throw new InvalidOperationException($"估算尺寸必须为有限正数：index={i}");
+                    nextIndices.Add(key, i); nextKeys[i] = key; nextTypes[i] = type;
+                    nextSizes[i] = (dynamicSize && !sourceChanged && measuredSizes.TryGetValue(key, out var measured) ? measured : dynamicSize ? estimate : DefaultItemSize) + AxisSpacing;
+                }
+                if (options.Index.HasValue && (options.Index.Value < 0 || options.Index.Value >= count)) throw new ArgumentOutOfRangeException(nameof(options));
+                var anchor = CaptureAnchor();
+                CancelAnimation();
+                followEndDuringMeasurement = options.AnchorPolicy == ScrollAnchorPolicy.StickToEnd;
+                RecycleAll();
+                if (sourceChanged) measuredSizes.Clear();
+                else
+                {
+                    var removed = new List<string>();
+                    foreach (var pair in measuredSizes) if (!nextIndices.ContainsKey(pair.Key)) removed.Add(pair.Key);
+                    for (var i = 0; i < removed.Count; i++) measuredSizes.Remove(removed[i]);
+                }
+                source = nextSource; keys = nextKeys; types = nextTypes; indices = nextIndices;
+                sizes.Reset(nextSizes, count); invalidSizes.Clear();
+                UpdateContentSize();
+                RestoreAnchor(anchor, options.AnchorPolicy);
+                if (options.Index.HasValue)
+                {
+                    alignedKey = keys[options.Index.Value]; alignedAlignment = options.Alignment;
+                    followEndDuringMeasurement = options.Index.Value == Count - 1 && options.Alignment == ScrollAlignment.End;
+                    SetOffset(TargetOffset(options.Index.Value, options.Alignment));
+                }
+                pendingOptions = !isActiveAndEnabled || ViewportLength <= 0 ? options : (ReloadOptions?)null;
+                dirty = true;
+            }
+            finally { committing = false; }
+            if (isActiveAndEnabled) Reconcile();
+            DataChanged?.Invoke();
+        }
+
+        private void RestoreAnchor(Anchor anchor, ScrollAnchorPolicy policy)
+        {
+            var position = policy == ScrollAnchorPolicy.StickToEnd ? MaxOffset : policy == ScrollAnchorPolicy.ResetToStart ? 0 : anchor.Position;
+            if (policy == ScrollAnchorPolicy.KeepFirstVisible && anchor.Index >= 0)
+            {
+                if (!indices.TryGetValue(anchor.Key, out var index))
+                {
+                    index = -1;
+                    for (var i = anchor.Index + 1; i < anchor.OldKeys.Length; i++)
+                        if (indices.TryGetValue(anchor.OldKeys[i], out var candidate)) { index = candidate; break; }
+                    if (index < 0) for (var i = anchor.Index - 1; i >= 0; i--)
+                        if (indices.TryGetValue(anchor.OldKeys[i], out var candidate)) { index = candidate; break; }
+                }
+                position = index >= 0 ? ItemStart(index) + anchor.Within : 0;
+            }
+            SetOffset(position);
+        }
+
+        /// <summary>定位数据索引；边界钳制，新请求取消旧动画。</summary>
+        /// <param name="index">0 到 Count-1。</param>
+        /// <param name="alignment">起点、中心或末尾对齐。</param>
+        /// <param name="animation">默认立即，平滑动画使用 unscaled time。</param>
+        public void ScrollTo(int index, ScrollAlignment alignment = ScrollAlignment.Start, ScrollAnimation animation = default)
+        {
+            if (index < 0 || index >= Count) throw new ArgumentOutOfRangeException(nameof(index));
+            if (!isActiveAndEnabled || ViewportLength <= 0) { pendingOptions = new ReloadOptions(index, alignment); return; }
+            ScrollToOffset(TargetOffset(index, alignment), animation);
+            alignedKey = keys[index]; alignedAlignment = alignment;
+            followEndDuringMeasurement = index == Count - 1 && alignment == ScrollAlignment.End;
+            // 立即定位的首轮测量已经执行过；按实测尺寸再纠正一次对齐。
+            if (dynamicSize && !IsAnimating) { SetOffset(TargetOffset(index, alignment)); Reconcile(); }
+        }
+        /// <summary>定位逻辑偏移；有限列表自动钳制，循环布局允许负数。</summary>
+        /// <param name="offset">Canvas UI 像素偏移。</param>
+        /// <param name="animation">动画时长。</param>
+        public void ScrollToOffset(float offset, ScrollAnimation animation = default)
+        {
+            if (!Finite(offset)) throw new ArgumentOutOfRangeException(nameof(offset));
+            CancelAnimation(); ScrollRect.StopMovement();
+            if (animation.Duration <= 0) { SetOffset(offset); dirty = true; if (isActiveAndEnabled) Reconcile(); }
+            else { animationFrom = Offset; animationTo = looping ? offset : Mathf.Clamp(offset, 0, MaxOffset); animationTime = 0; animationDuration = animation.Duration; }
+        }
+        public void CancelAnimation() { animationDuration = 0; alignedKey = null; }
+        private float TargetOffset(int index, ScrollAlignment alignment)
+        {
+            var start = ItemStart(index);
+            var size = IsGrid ? DefaultItemSize : sizes[index] - AxisSpacing;
+            return start - (alignment == ScrollAlignment.Center ? (ViewportLength - size) * .5f : alignment == ScrollAlignment.End ? ViewportLength - size : 0);
+        }
+        private float ItemStart(int index) => looping ? index * loopPageSize : StartPadding + (IsGrid ? (index / Lanes) * Stride : sizes.Prefix(index));
+        private int IndexAt(float position) => IsGrid ? Mathf.Clamp(Mathf.FloorToInt((position - StartPadding) / Stride) * Lanes, 0, Count - 1)
+            : sizes.Find(Mathf.Max(0, position - StartPadding));
+        private void SetOffset(float value)
+        {
+            value = looping ? value : Mathf.Clamp(value, 0, MaxOffset);
+            var position = ScrollRect.content.anchoredPosition;
+            if (IsVertical) position.y = value; else position.x = -value;
+            ScrollRect.content.anchoredPosition = position;
+            if (IsDragging && currentDrag != null)
+            {
+                // 尺寸/Prepend 修正改变逻辑偏移时，同步原生手势基线及上一帧位置。
+                // 只调用公开 API，下一次 OnDrag 不会覆盖锚点修正，也不会产生虚假惯性。
+                ScrollRect.OnBeginDrag(currentDrag);
+                ScrollRect.Rebuild(CanvasUpdate.PostLayout);
+            }
+            dirty = true;
+        }
+
+        /// <summary>标记绑定后的异步尺寸变化，下一个 LateUpdate 批量测量。</summary>
+        /// <param name="index">当前数据索引。</param>
+        public void InvalidateCellSize(int index)
+        {
+            if (!dynamicSize) return;
+            if (index < 0 || index >= Count) throw new ArgumentOutOfRangeException(nameof(index));
+            measuredSizes.Remove(keys[index]); invalidSizes.Add(index); dirty = true;
+        }
+        /// <summary>查询稳定 Key 的当前索引，不分配内存。</summary>
+        /// <param name="key">业务 Key。</param>
+        /// <param name="index">不存在时为 -1。</param>
+        /// <returns>是否存在。</returns>
+        public bool TryGetIndex(string key, out int index)
+        { if (key != null && indices.TryGetValue(key, out index)) return true; index = -1; return false; }
+        /// <summary>获取当前快照的 Key。</summary>
+        /// <param name="index">数据索引。</param>
+        public string GetItemKey(int index) => keys[index];
+        /// <summary>查询已实例化的可见 Cell；业务不得保存为永久数据引用。</summary>
+        /// <param name="index">数据索引。</param>
+        public LoopCell GetVisibleCell(int index)
+        {
+            foreach (var pair in active) if (pair.Value.Context.Index == index) return pair.Value;
+            return null;
+        }
+        internal void VisitActiveCells(Action<LoopCell, CellBindContext> visitor)
+        { foreach (var pair in active) visitor(pair.Value, pair.Value.Context); }
+
+        private void LateUpdate()
+        {
+            if (!initialized) return;
+            var nextSize = ScrollRect.viewport.rect.size;
+            if (nextSize != viewportSize)
+            {
+                var anchor = CaptureAnchor();
+                var oldCross = CrossSize;
+                viewportSize = nextSize;
+                if (dynamicSize && !Mathf.Approximately(oldCross, CrossSize))
+                {
+                    measuredSizes.Clear();
+                    for (var i = 0; i < Count; i++) sizes.Set(i, Mathf.Max(1, source.GetEstimatedSize(i, CrossSize)) + AxisSpacing);
+                    foreach (var pair in active) pair.Value.Measured = false;
+                }
+                UpdateContentSize(); RestoreAnchor(anchor, ScrollAnchorPolicy.KeepFirstVisible); dirty = true;
+            }
+            if (pendingOptions.HasValue && ViewportLength > 0)
+            {
+                var options = pendingOptions.Value; pendingOptions = null;
+                if (options.Index.HasValue && options.Index.Value < Count) SetOffset(TargetOffset(options.Index.Value, options.Alignment));
+                else if (options.AnchorPolicy == ScrollAnchorPolicy.StickToEnd) SetOffset(MaxOffset);
+            }
+            if (animationDuration > 0)
+            {
+                animationTime += Time.unscaledDeltaTime;
+                SetOffset(Mathf.Lerp(animationFrom, animationTo, Mathf.SmoothStep(0, 1, animationTime / animationDuration)));
+                if (animationTime >= animationDuration) animationDuration = 0;
+            }
+            if (dirty) Reconcile();
+        }
+
+        private void UpdateContentSize()
+        {
+            if (!initialized && ScrollRect.content == null) return;
+            ScrollRect.content.sizeDelta = IsVertical ? new Vector2(CrossSize, looping ? loopPageSize * Mathf.Max(1, Count) : ContentLength)
+                : new Vector2(looping ? loopPageSize * Mathf.Max(1, Count) : ContentLength, CrossSize);
+        }
+        private void OnScroll(Vector2 position) { dirty = true; ScrollPositionChanged?.Invoke(); }
+        private void HandleClick(LoopCell cell, CellBindContext context) { if (context.IsCurrent) CellClicked?.Invoke(cell, context); }
+
+        private void Reconcile()
+        {
+            if (reconciling || committing || handlingCellCallbacks || !initialized || !isActiveAndEnabled || ViewportLength <= 0 || CrossSize <= 0) return;
+            reconciling = true;
+            try
+            {
+                dirty = false;
+                if (Count == 0) { RecycleAll(); VisibleRange = VisibleRange.Empty; return; }
+                int firstSlot, lastSlot;
+                if (looping)
+                {
+                    firstSlot = Mathf.FloorToInt((Offset - overscan) / loopPageSize);
+                    lastSlot = Mathf.FloorToInt((Offset + ViewportLength + overscan - .01f) / loopPageSize);
+                    VisibleRange = new VisibleRange(Mod(Mathf.FloorToInt(Offset / loopPageSize), Count), Mod(Mathf.FloorToInt((Offset + ViewportLength - .01f) / loopPageSize), Count));
+                }
+                else
+                {
+                    firstSlot = IndexAt(Mathf.Max(0, Offset - overscan));
+                    lastSlot = IndexAt(Offset + ViewportLength + overscan - .01f);
+                    var visibleFirst = IndexAt(Mathf.Max(0, Offset));
+                    var visibleLast = IndexAt(Offset + ViewportLength - .01f);
+                    if (IsGrid) { lastSlot = Mathf.Min(Count - 1, lastSlot + Lanes - 1); visibleLast = Mathf.Min(Count - 1, visibleLast + Lanes - 1); }
+                    VisibleRange = new VisibleRange(visibleFirst, visibleLast);
+                }
+                recycleSlots.Clear();
+                foreach (var pair in active) if (pair.Key < firstSlot || pair.Key > lastSlot || refreshPending) recycleSlots.Add(pair.Key);
+                for (var i = 0; i < recycleSlots.Count; i++) Recycle(recycleSlots[i]);
+                refreshPending = false;
+                if (!isActiveAndEnabled) return;
+                for (var slot = firstSlot; slot <= lastSlot; slot++)
+                {
+                    if (!isActiveAndEnabled) break;
+                    var index = looping ? Mod(slot, Count) : slot;
+                    if (!active.TryGetValue(slot, out var cell))
+                    {
+                        var pool = pools[types[index]];
+                        cell = pool.Free.Count > 0 ? pool.Free.Pop() : CreateCell(types[index], pool);
+                        cell.Slot = slot;
+                        cell.transform.SetParent(ScrollRect.content, false);
+                        Position(cell, index, slot);
+                        var context = cell.BeginBind(keys[index], index, source, cachedClick);
+                        active.Add(slot, cell);
+                        // 先发布新 context，再激活：业务组件的 Awake 必须在 Bind 前完成。
+                        try { cell.gameObject.SetActive(true); source.BindCell(cell, index, context); if (context.IsCurrent) CellBound?.Invoke(cell, context); }
+                        catch (Exception exception)
+                        {
+                            Recycle(slot);
+                            Debug.LogError($"Cell 绑定失败：index={index}, key={keys[index]}, type={types[index]}\n{exception}", this);
+                            continue;
+                        }
+                    }
+                    else Position(cell, index, slot);
+                    if (dynamicSize && (!cell.Measured || invalidSizes.Contains(index))) dirty = true;
+                }
+                if (dynamicSize) MeasureActive();
+                if (!dirty && !IsAnimating) alignedKey = null;
+            }
+            finally { reconciling = false; }
+        }
+        private void Position(LoopCell cell, int index, int slot)
+        {
+            var rect = cell.RectTransform;
+            rect.anchorMin = rect.anchorMax = new Vector2(0, 1); rect.pivot = new Vector2(0, 1);
+            var axis = looping ? slot * loopPageSize : ItemStart(index);
+            var cross = CrossStartPadding + (IsGrid ? (index % Lanes) * (CrossCellSize + CrossSpacing) : 0);
+            var width = IsGrid ? cellSize.x : IsVertical ? Mathf.Max(1, CrossSize - CrossStartPadding - CrossEndPadding) : looping ? loopPageSize : sizes[index] - AxisSpacing;
+            var height = IsGrid ? cellSize.y : !IsVertical ? Mathf.Max(1, CrossSize - CrossStartPadding - CrossEndPadding) : looping ? loopPageSize : sizes[index] - AxisSpacing;
+            rect.sizeDelta = new Vector2(width, height);
+            rect.anchoredPosition = IsVertical ? new Vector2(cross, -axis) : new Vector2(axis, -cross);
+        }
+        private void MeasureActive()
+        {
+            var anchor = CaptureAnchor();
+            var stick = followEndDuringMeasurement || (Offset > 0 && DistanceToEnd <= 1);
+            var changed = false;
+            foreach (var pair in active)
+            {
+                var cell = pair.Value;
+                var index = cell.Context.Index;
+                if (cell.Measured && !invalidSizes.Contains(index)) continue;
+                LayoutRebuilder.ForceRebuildLayoutImmediate(cell.RectTransform);
+                var value = IsVertical ? LayoutUtility.GetPreferredHeight(cell.RectTransform) : LayoutUtility.GetPreferredWidth(cell.RectTransform);
+                if (!Finite(value) || value <= 0) value = IsVertical ? cell.RectTransform.rect.height : cell.RectTransform.rect.width;
+                value = Mathf.Max(1, value);
+                measuredSizes[keys[index]] = value;
+                cell.Measured = true; invalidSizes.Remove(index);
+                if (Mathf.Abs(sizes[index] - AxisSpacing - value) > .01f) { sizes.Set(index, value + AxisSpacing); changed = true; }
+            }
+            if (changed)
+            {
+                UpdateContentSize();
+                if (alignedKey != null && indices.TryGetValue(alignedKey, out var targetIndex))
+                {
+                    var target = TargetOffset(targetIndex, alignedAlignment);
+                    if (IsAnimating) animationTo = Mathf.Clamp(target, 0, MaxOffset); else SetOffset(target);
+                }
+                else RestoreAnchor(anchor, stick ? ScrollAnchorPolicy.StickToEnd : ScrollAnchorPolicy.KeepFirstVisible);
+                foreach (var pair in active) Position(pair.Value, pair.Value.Context.Index, pair.Key);
+                dirty = true;
+            }
+        }
+        private LoopCell CreateCell(int type, Pool pool)
+        {
+            var cell = Instantiate(pool.Prefab, poolRoot);
+            cell.gameObject.SetActive(false); cell.PoolType = type; CreatedCellCount++;
+            return cell;
+        }
+        private void Recycle(int slot)
+        {
+            if (!active.TryGetValue(slot, out var cell)) return;
+            // 先移出活跃表；业务解绑触发父节点隐藏时，不会重复回收同一个实例。
+            active.Remove(slot);
+            var context = cell.Context;
+            var previousHandling = handlingCellCallbacks;
+            handlingCellCallbacks = true;
+            try
+            {
+                cell.EndBind();
+                try { CellUnbound?.Invoke(cell, context); }
+                catch (Exception exception) { Debug.LogException(exception, this); }
+                if (cell != null && poolRoot != null)
+                {
+                    cell.gameObject.SetActive(false); cell.transform.SetParent(poolRoot, false);
+                    pools[cell.PoolType].Free.Push(cell);
+                }
+            }
+            finally { handlingCellCallbacks = previousHandling; }
+        }
+        private void RecycleAll()
+        {
+            recycleSlots.Clear(); foreach (var pair in active) recycleSlots.Add(pair.Key);
+            for (var i = 0; i < recycleSlots.Count; i++) Recycle(recycleSlots[i]);
+        }
+        /// <summary>进入 Carousel 内部循环布局；固定 List 专用。</summary>
+        /// <param name="pageSize">固定主轴页尺寸。</param>
+        internal void EnableLoop(float pageSize)
+        {
+            Initialize();
+            if (IsGrid || dynamicSize || pageSize <= 0) throw new InvalidOperationException("Carousel 需要固定尺寸 List。");
+            if (!looping)
+            {
+                savedMovement = ScrollRect.movementType; savedHorizontalBar = ScrollRect.horizontalScrollbar; savedVerticalBar = ScrollRect.verticalScrollbar;
+                ScrollRect.movementType = ScrollRect.MovementType.Unrestricted;
+                if (IsVertical) ScrollRect.verticalScrollbar = null; else ScrollRect.horizontalScrollbar = null;
+            }
+            looping = true; loopPageSize = pageSize; UpdateContentSize(); dirty = true;
+        }
+        internal void DisableLoop()
+        {
+            if (!looping) return;
+            looping = false; ScrollRect.movementType = savedMovement;
+            ScrollRect.horizontalScrollbar = savedHorizontalBar; ScrollRect.verticalScrollbar = savedVerticalBar;
+            RecycleAll(); UpdateContentSize(); SetOffset(0); dirty = true;
+        }
+        internal void RecenterLoop(int virtualPage, float pageSize)
+        {
+            if (!looping || Count < 2 || IsDragging || IsAnimating) return;
+            var page = Mod(virtualPage, Count);
+            if (page == virtualPage) return;
+            RecycleAll(); ScrollRect.StopMovement(); SetOffset(page * pageSize - (ViewportLength - pageSize) * .5f); dirty = true;
+        }
+        /// <summary>拖动开始时取消定位动画。</summary>
+        /// <param name="eventData">Unity 指针事件。</param>
+        public void OnBeginDrag(PointerEventData eventData) { IsDragging = true; currentDrag = eventData; CancelAnimation(); followEndDuringMeasurement = false; DragStarted?.Invoke(); }
+        /// <summary>结束拖动并通知扩展组件。</summary>
+        /// <param name="eventData">Unity 指针事件。</param>
+        public void OnEndDrag(PointerEventData eventData) { IsDragging = false; currentDrag = null; followEndDuringMeasurement = DistanceToEnd <= 1; DragEnded?.Invoke(); }
+        private void OnEnable() { dirty = true; }
+        private void OnDisable() { IsDragging = false; currentDrag = null; CancelAnimation(); if (initialized) RecycleAll(); VisibleRange = VisibleRange.Empty; }
+        private void OnDestroy()
+        {
+            if (!initialized) return;
+            ScrollRect.onValueChanged.RemoveListener(OnScroll); RecycleAll();
+            if (poolRoot != null) { if (Application.isPlaying) Destroy(poolRoot.gameObject); else DestroyImmediate(poolRoot.gameObject); }
+            pools.Clear(); measuredSizes.Clear(); source = null;
+        }
+        internal static int Mod(int value, int count) => ((value % count) + count) % count;
+        private static bool Finite(float value) => !float.IsNaN(value) && !float.IsInfinity(value);
+    }
+}

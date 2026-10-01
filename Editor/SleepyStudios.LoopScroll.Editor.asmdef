@@ -1,0 +1,6 @@
+{
+  "name": "SleepyStudios.LoopScroll.Editor",
+  "rootNamespace": "SleepyStudios.LoopScroll.Editor",
+  "references": ["SleepyStudios.LoopScroll", "UnityEngine.UI"],
+  "includePlatforms": ["Editor"]
+}

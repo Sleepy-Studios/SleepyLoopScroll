@@ -1,0 +1,6 @@
+{
+  "name": "SleepyStudios.LoopScroll",
+  "rootNamespace": "SleepyStudios.LoopScroll",
+  "references": ["UnityEngine.UI"],
+  "autoReferenced": true
+}

@@ -1,0 +1,6 @@
+{
+  "name": "SleepyStudios.LoopScroll.Tests.PlayMode",
+  "references": ["SleepyStudios.LoopScroll", "UnityEngine.UI"],
+  "optionalUnityReferences": ["TestAssemblies"],
+  "autoReferenced": false
+}

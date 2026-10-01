@@ -1,0 +1,7 @@
+{
+  "name": "SleepyStudios.LoopScroll.Tests.EditMode",
+  "references": ["SleepyStudios.LoopScroll", "SleepyStudios.LoopScroll.Editor", "UnityEngine.UI"],
+  "includePlatforms": ["Editor"],
+  "optionalUnityReferences": ["TestAssemblies"],
+  "autoReferenced": false
+}
