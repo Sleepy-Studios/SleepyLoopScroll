@@ -7,9 +7,6 @@
   "author": { "name": "Sleepy Studios" },
   "dependencies": { "com.unity.ugui": "1.0.0" },
   "samples": [
-    { "displayName": "Basic Lists", "description": "Vertical, horizontal and grid lists.", "path": "Samples~/Basic" },
-    { "displayName": "Multiple Cell Types", "description": "Per-type pools and selection.", "path": "Samples~/MultiType" },
-    { "displayName": "Dynamic Chat", "description": "Dynamic message heights and history anchors.", "path": "Samples~/Chat" },
-    { "displayName": "Carousel and Paging", "description": "Looping pages, boundary requests and nested scrolling.", "path": "Samples~/CarouselPaging" }
+    { "displayName": "Loop Scroll Showcase", "description": "中文 / English: a main menu and four navigable list, chat, carousel and paging scenes.", "path": "Samples~/Showcase" }
   ]
 }

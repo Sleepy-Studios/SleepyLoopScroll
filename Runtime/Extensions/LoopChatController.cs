@@ -16,7 +16,7 @@ namespace SleepyStudios.LoopScroll
         private void OnData()
         {
             if (!initiallyPositioned && list.Count > 0)
-            { initiallyPositioned = true; list.ScrollTo(list.Count - 1, ScrollAlignment.End); }
+            { initiallyPositioned = true; list.ScrollToCell(list.Count - 1, ScrollAlignment.End); }
         }
         private void OnPosition() { if (list.DistanceToEnd <= 1) SetUnread(0); }
         /// <summary>调用方追加消息后通知列表；浏览历史时保留画面并增加未读。</summary>
@@ -32,7 +32,7 @@ namespace SleepyStudios.LoopScroll
         /// <param name="count">前插历史消息数量。</param>
         public void PrependHistory(int count) { list.Prepend(count, ScrollAnchorPolicy.KeepFirstVisible); }
         /// 回到底部并清除未读；空列表不定位。
-        public void JumpToLatest() { if (list.Count > 0) list.ScrollTo(list.Count - 1, ScrollAlignment.End); SetUnread(0); }
+        public void JumpToLatest() { if (list.Count > 0) list.ScrollToCell(list.Count - 1, ScrollAlignment.End); SetUnread(0); }
         private void SetUnread(int value) { if (UnreadCount == value) return; UnreadCount = value; UnreadChanged?.Invoke(value); }
     }
 }

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — 示例与 API 易用性
+
+- 一个 Showcase 导入入口，五个可导航场景及返回按钮；Editor 不依赖 Build Settings。
+- 首次中文、持久化中英文切换、稳定 ID 数据与独立 Noto Sans SC 字体。
+- 统一 RegisterCellBinding 后 SetTotalCount；操作入口为 RefreshCells、RefillCells(RefillOptions)、ScrollToCell。
+- 删除平行方法与重复简单数据源；保留稳定锚点、异步隔离和高级 DataSource。宿主仅三种带 context 的注册与 MvcBind 回调。
+
 ## 0.1.0 — 2026-10-01 本地实现，尚未发布
 
 - 原生 ScrollRect 组合的虚拟 List、固定 Grid、类型独立对象池。

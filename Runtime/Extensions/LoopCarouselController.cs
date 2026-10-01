@@ -43,7 +43,7 @@ namespace SleepyStudios.LoopScroll
                 list.ScrollRect.StopMovement();
                 list.DisableLoop(); CurrentPage = list.Count == 0 ? -1 : 0;
                 list.ScrollRect.horizontal = false; list.ScrollRect.vertical = false;
-                if (list.Count == 1) list.ScrollTo(0, ScrollAlignment.Center);
+                if (list.Count == 1) list.ScrollToCell(0, ScrollAlignment.Center);
                 PageChanged?.Invoke(CurrentPage); return;
             }
             list.EnableLoop(pageSize);
@@ -81,7 +81,7 @@ namespace SleepyStudios.LoopScroll
         public void SetPage(int page, ScrollAnimation animation = default)
         {
             if (page < 0 || page >= list.Count) throw new ArgumentOutOfRangeException(nameof(page));
-            if (list.Count == 1) { list.ScrollTo(0, ScrollAlignment.Center, animation); return; }
+            if (list.Count == 1) { list.ScrollToCell(0, ScrollAlignment.Center, animation); return; }
             var nearest = NearestVirtualPage;
             var cycle = Mathf.RoundToInt((nearest - page) / (float)list.Count);
             Snap(cycle * list.Count + page, animation);

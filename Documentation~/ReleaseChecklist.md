@@ -1,6 +1,6 @@
 # v0.1.0 Release Checklist
 
-开发版本；代码提交与推送已获授权，不代表 v0.1.0 tag 已发布。验证结果见 Validation.md。
+开发版本；代码提交与推送已获授权，不代表 v0.1.0 tag 已发布。首版历史结果见 Validation.md；当前收口验证见 UnifiedValidation.md，历史勾选不代表当前代码通过。
 
 - [x] Unity 2022.3.62f3 导入与编译。
 - [x] Unity 6000.3.15f1 导入与编译。
@@ -10,6 +10,8 @@
 - [x] 四个独立 Samples 双版本运行与截图验收，范围见 Validation。
 - [x] SleepyDemos MvcBind 生成、订阅、ItemView 复用与点击身份验收。
 - [x] 文档、CHANGELOG、Unity .meta 齐全，无宿主运行时依赖。
+- [x] 包 API 收口、纯包 Showcase 和语言完成双版本 Test Runner 验证，见 UnifiedValidation.md。
+- [x] 收口后的宿主三种正式回调、MvcBind 生成与示例 Test Runner/截图验收完成，18/18。
 - [ ] 临时兼容宿主关闭并清理，原有工作保留。
 - [ ] 用户明确授权发布。
 - [x] 创建私有远端并提交推送开发分支。

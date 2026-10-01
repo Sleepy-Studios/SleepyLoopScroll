@@ -1,5 +1,7 @@
 # Validation
 
+**当前 API 收口结果见 [Unified Validation](UnifiedValidation.md)；示例调整阶段历史见 [Showcase Validation](ShowcaseValidation.md)。下表记录首次实现基线，不代表后续修改已完成双版本验收。**
+
 日期：2026-10-01（Asia/Shanghai）。状态：本地实现与双版本功能/性能验证完成；开发代码提交至私有仓库 `Sleepy-Studios/SleepyLoopScroll` 的 `codex/v0.1-implementation` 分支，尚未发布 `v0.1.0` 标签。用户已授权代码提交与推送；宿主继续使用本地包依赖。临时宿主目录的删除被自动审批拒绝，目录清理仍需用户完成。
 
 | 验证范围 | Unity 2022.3.62f3 / uGUI 1.0.0 | Unity 6000.3.15f1 / uGUI 2.0.0 |

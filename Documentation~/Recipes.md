@@ -2,7 +2,7 @@
 
 ## 背包与选择
 
-单类型 SetData；多类型实现 GetCellType。用业务 ID 的字符串作 Key。添加 LoopSelectionController，通过 CellSelectionChanged 更新描边/颜色，SelectionChanged 读取 SelectedKeys。选择刷新不重新绑定 Cell，避免中断资源加载。
+单类型先 RegisterCellBinding 再 SetTotalCount；多类型实现 GetCellType。用业务 ID 的字符串作 Key。添加 LoopSelectionController，通过 CellSelectionChanged 更新描边/颜色，SelectionChanged 读取 SelectedKeys。选择刷新不重新绑定 Cell，避免中断资源加载。
 
 ## Chat
 

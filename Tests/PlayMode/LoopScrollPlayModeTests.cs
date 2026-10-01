@@ -17,10 +17,10 @@ namespace SleepyStudios.LoopScroll.Tests
         private ScrollRect scroll;
         private LoopCell template;
         private readonly List<string> items = new List<string>();
-        private static readonly Func<string, string> KeySelector = value => value;
-        private static readonly Action<Image, string, CellBindContext> Bind = (cell, value, context) => cell.color = Color.white;
+        private static readonly Func<object, string> KeySelector = value => (string)value;
+        private static readonly Action<Image, int, CellBindContext> Bind = (cell, value, context) => cell.color = Color.white;
 
-        private void Create(LoopLayout mode = LoopLayout.Vertical, bool dynamic = false, int prewarm = 40)
+        private void Create(LoopLayout mode = LoopLayout.Vertical, bool dynamic = false, int prewarm = 40, bool registerBinding = true)
         {
             canvas = new GameObject("LoopTestCanvas", typeof(RectTransform), typeof(Canvas));
             canvas.GetComponent<Canvas>().renderMode = RenderMode.ScreenSpaceOverlay;
@@ -35,10 +35,11 @@ namespace SleepyStudios.LoopScroll.Tests
             scroll.viewport = viewport; scroll.content = content;
             list = root.AddComponent<LoopScrollView>();
             list.Configure(scroll, new[] { new LoopCellPrefab { Type = 0, Prefab = template, Prewarm = prewarm } }, mode, new Vector2(100, 40), dynamic);
+            if (registerBinding) list.RegisterCellBinding(Bind);
         }
         private void Populate(int count)
         { items.Clear(); for (var i = 0; i < count; i++) items.Add("item:" + i); }
-        private void Submit(ReloadOptions options = default) { list.SetData(items, Bind, null, KeySelector, options); }
+        private void Submit(RefillOptions options = default) { list.SetTotalCount(items, options, KeySelector); }
         [TearDown]
         public void Cleanup() { if (canvas != null) UnityEngine.Object.DestroyImmediate(canvas); items.Clear(); }
 
@@ -47,25 +48,64 @@ namespace SleepyStudios.LoopScroll.Tests
         {
             Create(); Populate(100000); Submit(); yield return null;
             Assert.That(list.ActiveCellCount, Is.LessThan(20)); var created = list.CreatedCellCount;
-            for (var i = 0; i < 100; i++) { list.ScrollTo(i * 987); yield return null; }
+            for (var i = 0; i < 100; i++) { list.ScrollToCell(i * 987); yield return null; }
             Assert.That(list.CreatedCellCount, Is.EqualTo(created));
             Assert.That(list.VisibleRange.First, Is.GreaterThan(90000));
+        }
+        [UnityTest]
+        public IEnumerator RegisteredBindingSupportsRepeatedSubmissionNullAndInactiveRecovery()
+        {
+            Create(registerBinding: false); Populate(100);
+            Assert.Throws<InvalidOperationException>(() => list.SetTotalCount(items));
+            var unbound = 0;
+            list.RegisterCellBinding<Image>((cell, index, context) => Assert.That(context.Key, Is.EqualTo(items[index])),
+                (cell, context) => { Assert.That(context.IsCurrent, Is.False); unbound++; });
+            list.SetTotalCount(items, getItemKey: item => (string)item); yield return null;
+            list.ScrollToCell(40, ScrollAlignment.Center);
+            var offset = list.Offset; var first = list.GetItemKey(list.VisibleRange.First);
+            items.Insert(0, "history");
+            list.SetTotalCount(items, new RefillOptions(ScrollAnchorPolicy.KeepFirstVisible), item => (string)item);
+            Assert.That(list.GetItemKey(list.VisibleRange.First), Is.EqualTo(first));
+            Assert.That(list.Offset, Is.EqualTo(offset + 40).Within(1));
+            var previous = list.GetVisibleCell(list.VisibleRange.First).Context;
+            list.RefreshCells(); Assert.That(previous.IsCurrent, Is.False);
+            list.SetTotalCount(items, getItemKey: item => (string)item); Assert.That(list.Offset, Is.Zero.Within(1));
+            list.RefillCells(new RefillOptions(20)); Assert.That(list.Offset, Is.EqualTo(800).Within(1));
+            list.RefillCells(new RefillOptions(ScrollAnchorPolicy.StickToEnd)); Assert.That(list.DistanceToEnd, Is.Zero.Within(1));
+            list.SetTotalCount(null); Assert.That(list.Count, Is.Zero); list.RefillCells();
+            list.gameObject.SetActive(false);
+            list.SetTotalCount(items, new RefillOptions(10), item => (string)item);
+            Assert.That(list.ActiveCellCount, Is.Zero);
+            list.gameObject.SetActive(true); yield return null; yield return null;
+            Assert.That(list.Count, Is.EqualTo(101)); Assert.That(list.Offset, Is.EqualTo(400).Within(1));
+            Assert.That(unbound, Is.GreaterThan(0));
+        }
+        [UnityTest]
+        public IEnumerator ReregisterDoesNotReplaceUnbindOfExistingCells()
+        {
+            Create(); Populate(20); var oldUnbind = 0; var nextUnbind = 0;
+            list.RegisterCellBinding<Image>((cell, index, context) => { }, (cell, context) => oldUnbind++);
+            list.SetTotalCount(items); yield return null; var activeCount = list.ActiveCellCount;
+            list.RegisterCellBinding<Image>((cell, index, context) => { }, (cell, context) => nextUnbind++);
+            list.SetTotalCount(items);
+            Assert.That(oldUnbind, Is.EqualTo(activeCount)); Assert.That(nextUnbind, Is.Zero);
+            list.SetTotalCount(null); Assert.That(nextUnbind, Is.GreaterThan(0));
         }
         [UnityTest]
         public IEnumerator HorizontalScrollAndAlignmentsUseActualViewport()
         {
             Create(LoopLayout.Horizontal); Populate(100); Submit(); yield return null;
-            list.ScrollTo(50, ScrollAlignment.Start); Assert.That(list.Offset, Is.EqualTo(5000).Within(1));
-            list.ScrollTo(50, ScrollAlignment.Center); Assert.That(list.Offset, Is.EqualTo(4900).Within(1));
-            list.ScrollTo(50, ScrollAlignment.End, new ScrollAnimation(.05f)); yield return new WaitForSecondsRealtime(.1f);
+            list.ScrollToCell(50, ScrollAlignment.Start); Assert.That(list.Offset, Is.EqualTo(5000).Within(1));
+            list.ScrollToCell(50, ScrollAlignment.Center); Assert.That(list.Offset, Is.EqualTo(4900).Within(1));
+            list.ScrollToCell(50, ScrollAlignment.End, new ScrollAnimation(.05f)); yield return new WaitForSecondsRealtime(.1f);
             Assert.That(list.Offset, Is.EqualTo(4800).Within(1));
-            list.ScrollTo(99, ScrollAlignment.Start); Assert.That(list.Offset, Is.EqualTo(list.MaxOffset).Within(1));
+            list.ScrollToCell(99, ScrollAlignment.Start); Assert.That(list.Offset, Is.EqualTo(list.MaxOffset).Within(1));
         }
         [UnityTest]
         public IEnumerator GridResizeReflowsColumnsAndRetainsAnchor()
         {
             Create(LoopLayout.VerticalGrid); Populate(100); Submit(); yield return null;
-            list.ScrollTo(30); var key = list.GetItemKey(list.VisibleRange.First);
+            list.ScrollToCell(30); var key = list.GetItemKey(list.VisibleRange.First);
             scroll.viewport.sizeDelta = new Vector2(200, 200); yield return null; yield return null;
             Assert.That(list.VisibleRange.First, Is.EqualTo(30));
             Assert.That(list.GetItemKey(list.VisibleRange.First), Is.EqualTo(key));
@@ -75,21 +115,21 @@ namespace SleepyStudios.LoopScroll.Tests
         public IEnumerator ZeroInactiveSubmissionAndReenableBuildCells()
         {
             Create(); Populate(0); Submit(); yield return null; Assert.That(list.ActiveCellCount, Is.Zero);
-            list.gameObject.SetActive(false); Populate(20); list.ReloadData();
+            list.gameObject.SetActive(false); Populate(20); list.RefillCells();
             Assert.That(list.ActiveCellCount, Is.Zero); list.gameObject.SetActive(true); yield return null; yield return null;
             Assert.That(list.ActiveCellCount, Is.GreaterThan(0));
-            items.Clear(); list.ReloadData(); Assert.That(list.ActiveCellCount, Is.Zero);
-            Populate(30); list.ReloadData(); yield return null; Assert.That(list.ActiveCellCount, Is.GreaterThan(0));
+            items.Clear(); list.RefillCells(); Assert.That(list.ActiveCellCount, Is.Zero);
+            Populate(30); list.RefillCells(); yield return null; Assert.That(list.ActiveCellCount, Is.GreaterThan(0));
         }
         [UnityTest]
         public IEnumerator ComponentAwakeCompletesBeforeBindingAnInactivePrefab()
         {
             Create(); template.gameObject.AddComponent<AwakeInitializedCell>(); Populate(30);
-            list.SetData<string, AwakeInitializedCell>(items, (cell, item, context) => Assert.That(cell.Initialized, Is.True), null, KeySelector);
+            list.RegisterCellBinding<AwakeInitializedCell>((cell, index, context) => Assert.That(cell.Initialized, Is.True)); Submit();
             yield return null; Assert.That(list.ActiveCellCount, Is.GreaterThan(0));
         }
         [UnityTest]
-        public IEnumerator PrependRemoveReplaceMoveAndReloadPreserveStableIdentity()
+        public IEnumerator PrependRemoveReplaceMoveAndRefillPreserveStableIdentity()
         {
             Create(); Populate(100); Submit(); yield return null;
             list.ScrollToOffset(807); var key = list.GetItemKey(list.VisibleRange.First);
@@ -101,13 +141,13 @@ namespace SleepyStudios.LoopScroll.Tests
             var anchor = list.VisibleRange.First; items.RemoveAt(anchor); list.ApplyChanges(new[] { LoopListChange.Remove(anchor) });
             Assert.That(list.Offset % 40, Is.EqualTo(7).Within(1));
             items[0] = "replacement"; list.ApplyChanges(new[] { LoopListChange.Replace(0) });
-            list.ReloadData(new ReloadOptions(ScrollAnchorPolicy.KeepPosition)); yield return null;
+            list.RefillCells(new RefillOptions(ScrollAnchorPolicy.KeepPosition)); yield return null;
             Assert.That(list.Offset % 40, Is.EqualTo(7).Within(1));
         }
         [UnityTest]
         public IEnumerator PrependDuringDragRebasesNativePointerWithoutJump()
         {
-            Create(); Populate(100); Submit(); yield return null; list.ScrollTo(20);
+            Create(); Populate(100); Submit(); yield return null; list.ScrollToCell(20);
             var events = new GameObject("PointerEvents", typeof(EventSystem));
             try
             {
@@ -123,7 +163,7 @@ namespace SleepyStudios.LoopScroll.Tests
         public IEnumerator UnbindCannotReenterSnapshotUpdate()
         {
             Create(); Populate(30); var rejected = 0;
-            list.SetData<string, Image>(items, Bind, (cell, context) => { Assert.Throws<InvalidOperationException>(() => list.ReloadData()); rejected++; }, KeySelector);
+            list.RegisterCellBinding(Bind, (cell, context) => { Assert.Throws<InvalidOperationException>(() => list.RefillCells()); rejected++; }); Submit();
             yield return null; items.Insert(0, "new"); list.Prepend(1);
             Assert.That(rejected, Is.GreaterThan(0)); Assert.That(list.Count, Is.EqualTo(31));
         }
@@ -134,7 +174,7 @@ namespace SleepyStudios.LoopScroll.Tests
             var context = list.GetVisibleCell(0).Context;
             Assert.Throws<InvalidOperationException>(() => list.ApplyChanges(new[] { LoopListChange.Insert(0) }));
             Assert.That(context.IsCurrent, Is.True); var count = list.Count;
-            items[1] = items[0]; Assert.Throws<InvalidOperationException>(() => list.ReloadData());
+            items[1] = items[0]; Assert.Throws<InvalidOperationException>(() => list.RefillCells());
             Assert.That(list.Count, Is.EqualTo(count)); Assert.That(context.IsCurrent, Is.True);
         }
         [UnityTest]
@@ -150,21 +190,21 @@ namespace SleepyStudios.LoopScroll.Tests
             }
             Assert.That(firstTokenBytes, Is.GreaterThan(0)); Assert.That(secondTokenBytes, Is.Zero); Assert.That(sameToken, Is.EqualTo(token));
             Debug.Log($"SleepyLoopScroll token allocation: firstBytes={firstTokenBytes}, repeatedBytes={secondTokenBytes}");
-            list.ScrollTo(80); yield return null;
+            list.ScrollToCell(80); yield return null;
             Assert.That(token.IsCancellationRequested, Is.True); Assert.That(old.IsCurrent, Is.False);
             Assert.That(old.CancellationToken.IsCancellationRequested, Is.True);
             var wrote = false; Action lateResult = () => { if (old.IsCurrent) { cell.GetComponent<Image>().color = Color.red; wrote = true; } };
             lateResult(); Assert.That(wrote, Is.False);
             var current = list.GetVisibleCell(80).Context;
-            list.RefreshVisible(); Assert.That(current.IsCurrent, Is.False);
+            list.RefreshCells(); Assert.That(current.IsCurrent, Is.False);
             current = list.GetVisibleCell(80).Context; list.gameObject.SetActive(false); Assert.That(current.IsCurrent, Is.False);
         }
         [UnityTest]
         public IEnumerator DynamicHeightChangesAndCrossAxisResizeKeepAnchor()
         {
             Create(dynamic: true); Populate(100);
-            list.SetData<string, LayoutElement>(items, (cell, value, context) => { cell.preferredHeight = 60; }, null, KeySelector);
-            yield return null; yield return null; list.ScrollTo(50); yield return null; yield return null;
+            list.RegisterCellBinding<LayoutElement>((cell, index, context) => cell.preferredHeight = 60); Submit();
+            yield return null; yield return null; list.ScrollToCell(50); yield return null; yield return null;
             var key = list.GetItemKey(list.VisibleRange.First); var cell = list.GetVisibleCell(list.VisibleRange.First);
             cell.GetComponent<LayoutElement>().preferredHeight = 120; list.InvalidateCellSize(cell.Context.Index);
             yield return null; yield return null;
@@ -177,16 +217,16 @@ namespace SleepyStudios.LoopScroll.Tests
         public IEnumerator DynamicCenterAlignmentIsCorrectAfterFirstMeasurement()
         {
             Create(dynamic: true); Populate(100);
-            list.SetData<string, LayoutElement>(items, (cell, value, context) => cell.preferredHeight = 80, null, KeySelector);
-            yield return null; yield return null; list.ScrollTo(50, ScrollAlignment.Center); yield return null; yield return null; yield return null;
+            list.RegisterCellBinding<LayoutElement>((cell, index, context) => cell.preferredHeight = 80); Submit();
+            yield return null; yield return null; list.ScrollToCell(50, ScrollAlignment.Center); yield return null; yield return null; yield return null;
             var cell = list.GetVisibleCell(50);
             Assert.That(cell.RectTransform.anchoredPosition.y + list.Offset, Is.EqualTo(-60).Within(1));
         }
         [UnityTest]
-        public IEnumerator ReloadTargetUsesMeasuredDynamicAlignment()
+        public IEnumerator RefillTargetUsesMeasuredDynamicAlignment()
         {
             Create(dynamic: true); Populate(100);
-            list.SetData<string, LayoutElement>(items, (cell, value, context) => cell.preferredHeight = 80, null, KeySelector, new ReloadOptions(50, ScrollAlignment.Center));
+            list.RegisterCellBinding<LayoutElement>((cell, index, context) => cell.preferredHeight = 80); Submit(new RefillOptions(50, ScrollAlignment.Center));
             yield return null; yield return null; yield return null;
             var cell = list.GetVisibleCell(50);
             Assert.That(cell.RectTransform.anchoredPosition.y + list.Offset, Is.EqualTo(-60).Within(1));
@@ -196,7 +236,7 @@ namespace SleepyStudios.LoopScroll.Tests
         {
             Create(); var chat = list.gameObject.AddComponent<LoopChatController>(); Populate(100); Submit(); yield return null; yield return null;
             Assert.That(list.DistanceToEnd, Is.LessThanOrEqualTo(1));
-            list.ScrollTo(20); items.Insert(0, "history"); chat.PrependHistory(1);
+            list.ScrollToCell(20); items.Insert(0, "history"); chat.PrependHistory(1);
             Assert.That(list.GetItemKey(list.VisibleRange.First), Is.EqualTo("item:20"));
             items.Add("new"); chat.AppendMessages(1); Assert.That(chat.UnreadCount, Is.EqualTo(1));
             chat.JumpToLatest(); Assert.That(chat.UnreadCount, Is.Zero);
@@ -218,7 +258,7 @@ namespace SleepyStudios.LoopScroll.Tests
         public IEnumerator SelectionSurvivesRefreshAndClearsDeletedKeys()
         {
             Create(); Populate(40); Submit(); var selection = list.gameObject.AddComponent<LoopSelectionController>();
-            selection.SetSelected("item:2", true); list.RefreshVisible(); Assert.That(selection.IsSelected("item:2"), Is.True);
+            selection.SetSelected("item:2", true); list.RefreshCells(); Assert.That(selection.IsSelected("item:2"), Is.True);
             selection.SetSelected("item:3", true); Assert.That(selection.IsSelected("item:2"), Is.False);
             selection.MultiSelect = true; selection.SetSelected("item:4", true); Assert.That(selection.SelectedKeys.Count, Is.EqualTo(2));
             items.RemoveAt(3); list.ApplyChanges(new[] { LoopListChange.Remove(3) }); Assert.That(selection.IsSelected("item:3"), Is.False); yield return null;
@@ -228,11 +268,11 @@ namespace SleepyStudios.LoopScroll.Tests
         {
             Create(LoopLayout.Horizontal); var carousel = list.gameObject.AddComponent<LoopCarouselController>(); carousel.Configure(300, 0, 0);
             Populate(0); Submit(); Assert.That(carousel.CurrentPage, Is.EqualTo(-1));
-            Populate(1); list.ReloadData(); yield return null; Assert.That(list.IsLooping, Is.False);
-            Populate(2); list.ReloadData(); yield return null; yield return null; Assert.That(list.IsLooping, Is.True);
+            Populate(1); list.RefillCells(); yield return null; Assert.That(list.IsLooping, Is.False);
+            Populate(2); list.RefillCells(); yield return null; yield return null; Assert.That(list.IsLooping, Is.True);
             for (var i = 0; i < 6; i++) { carousel.Next(); yield return null; yield return null; }
             Assert.That(carousel.CurrentPage, Is.EqualTo(0)); Assert.That(Mathf.Abs(list.Offset), Is.LessThan(1000));
-            Populate(5); list.ReloadData(); yield return null; carousel.SetPage(4); yield return null; yield return null;
+            Populate(5); list.RefillCells(); yield return null; carousel.SetPage(4); yield return null; yield return null;
             Assert.That(carousel.CurrentPage, Is.EqualTo(4)); carousel.Previous(); yield return null; yield return null;
             Assert.That(carousel.CurrentPage, Is.EqualTo(3));
         }
@@ -273,7 +313,7 @@ namespace SleepyStudios.LoopScroll.Tests
         {
             Create(LoopLayout.Horizontal); var bar = new GameObject("Scrollbar", typeof(RectTransform), typeof(Scrollbar)).GetComponent<Scrollbar>();
             bar.transform.SetParent(canvas.transform); scroll.horizontalScrollbar = bar;
-            Populate(100); Submit(); yield return null; list.ScrollTo(50); yield return null; yield return null;
+            Populate(100); Submit(); yield return null; list.ScrollToCell(50); yield return null; yield return null;
             Assert.That(bar.value, Is.EqualTo(5000f / 9700).Within(.001f));
             bar.value = .5f; yield return null; yield return null; Assert.That(list.Offset, Is.EqualTo(4850).Within(1));
         }
@@ -283,9 +323,9 @@ namespace SleepyStudios.LoopScroll.Tests
             Create(); scroll.viewport.sizeDelta = Vector2.zero; Populate(20); Submit(); yield return null;
             Assert.That(list.ActiveCellCount, Is.Zero); scroll.viewport.sizeDelta = new Vector2(300, 200); yield return null; yield return null;
             Assert.That(list.ActiveCellCount, Is.GreaterThan(0));
-            items.Clear(); list.ReloadData(); Populate(1);
+            items.Clear(); list.RefillCells(); Populate(1);
             LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex("Cell 绑定失败.*"));
-            list.SetData<string, Text>(items, (cell, item, context) => { }, null, KeySelector);
+            list.RegisterCellBinding<Text>((cell, index, context) => { }); Submit();
             Assert.That(list.ActiveCellCount, Is.Zero);
         }
         [UnityTest]
@@ -315,7 +355,7 @@ namespace SleepyStudios.LoopScroll.Tests
             Assert.That(list.GetVisibleCell(0).name, Is.Not.Null); var old = list.GetVisibleCell(0).Context;
             source.Flip = true; list.ApplyChanges(new[] { LoopListChange.Replace(0, source.Count) });
             Assert.That(old.IsCurrent, Is.False); var created = list.CreatedCellCount;
-            list.ScrollTo(40); yield return null; Assert.That(list.CreatedCellCount, Is.EqualTo(created));
+            list.ScrollToCell(40); yield return null; Assert.That(list.CreatedCellCount, Is.EqualTo(created));
         }
         private sealed class AlternatingSource : ILoopDataSource
         {
@@ -326,10 +366,11 @@ namespace SleepyStudios.LoopScroll.Tests
             public void UnbindCell(LoopCell cell, CellBindContext context) { }
         }
         [UnityTest]
-        public IEnumerator WarmSynchronousScrollingSixtySecondsAllocatesNoPluginMemory()
+        public IEnumerator WarmRegisteredScrollingSixtySecondsAllocatesNoPluginMemory()
         {
-            Create(prewarm: 50); Populate(100000); Submit(); yield return null;
-            for (var i = 0; i < 100; i++) list.ScrollTo(i * 500);
+            Create(prewarm: 50); Populate(100000); Submit();
+            yield return null;
+            for (var i = 0; i < 100; i++) list.ScrollToCell(i * 500);
             yield return null; var created = list.CreatedCellCount;
             var until = Time.realtimeSinceStartup + 60; var step = 0; long totalAllocated = 0;
             using (var probe = new GcAllocationProbe())
@@ -337,12 +378,12 @@ namespace SleepyStudios.LoopScroll.Tests
             while (Time.realtimeSinceStartup < until)
             {
                 probe.Begin();
-                list.ScrollTo((step++ * 37) % 99000);
+                list.ScrollToCell((step++ * 37) % 99000);
                 totalAllocated += probe.End();
                 yield return null;
             }
             }
-            Assert.That(totalAllocated, Is.Zero, "同步 ScrollTo/Reconcile 的当前线程内部分配");
+            Assert.That(totalAllocated, Is.Zero, "同步 ScrollToCell/Reconcile 的当前线程内部分配");
             Assert.That(list.CreatedCellCount, Is.EqualTo(created));
             Debug.Log($"SleepyLoopScroll 60s synchronous benchmark: calls={step}, managedBytes={totalAllocated}, created={created}");
         }

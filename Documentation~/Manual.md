@@ -1,5 +1,11 @@
 # Manual
 
+## 示例入口与语言
+
+一次导入 Loop Scroll Showcase，打开 Main.unity。主菜单进入 Basic、MultiType、Chat、CarouselPaging，子场景可返回且可独立运行。首次中文，主菜单切换中英文并保存示例专用语言偏好；业务 Key 与翻译文字分离。字库随示例提供，不依赖 TMP 或本机系统字体。
+
+Editor 菜单 Open Showcase 打开主页。Build Imported Sample Scenes 重建前要求当前场景已保存，并在结束后恢复原场景组合。导入后的实际目录由 Catalog 自动解析，Editor 导航不用修改 Build Settings。独立 Player 演示构建显式包括五个场景；缺失配置显示错误。
+
 ## 层级
 
 ```text
@@ -17,7 +23,7 @@ Canvas
 
 `Layout` 选择 Vertical/Horizontal/VerticalGrid/HorizontalGrid。`Cell Size` 是固定尺寸或动态 List 的初始估算。`Spacing` 非负；`Padding` 为四边内距；`Overscan` 为 Viewport 外的预加载距离。Grid 使用 Viewport 横轴可用长度计算每行/列数量，至少一个。
 
-Cell Prefabs 中的 Type 必须唯一，Prefab 根节点包含 LoopCell 和 RectTransform。简单 SetData 使用 Type 0。多类型数据源返回相应整数 Type，不能返回未配置值。Prewarm 按类型分别配置；覆盖最大 Viewport 和 Overscan 所需对象数量后，滚动不再创建实例。
+Cell Prefabs 中的 Type 必须唯一，Prefab 根节点包含 LoopCell 和 RectTransform。简单 SetTotalCount 使用 Type 0。多类型数据源返回相应整数 Type，不能返回未配置值。Prewarm 按类型分别配置；覆盖最大 Viewport 和 Overscan 所需对象数量后，滚动不再创建实例。
 
 Content 上的 LayoutGroup/ContentSizeFitter 是错误配置；Inspector 和首次提交数据都会报告。Cell 内部可使用布局组件，不需要为此移除子级布局。
 

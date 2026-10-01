@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using SleepyStudios.LoopScroll.Internal;
 using UnityEngine;
@@ -35,6 +36,8 @@ namespace SleepyStudios.LoopScroll
         private string[] keys = Array.Empty<string>();
         private int[] types = Array.Empty<int>();
         private ILoopDataSource source;
+        private Action<LoopCell, int, CellBindContext> registeredBind;
+        private Action<LoopCell, CellBindContext> registeredUnbind;
         private RectTransform poolRoot;
         private Vector2 viewportSize;
         private bool initialized;
@@ -51,7 +54,7 @@ namespace SleepyStudios.LoopScroll
         private float animationTime;
         private float animationDuration;
         private Action<LoopCell, CellBindContext> cachedClick;
-        private ReloadOptions? pendingOptions;
+        private RefillOptions? pendingOptions;
         private ScrollRect.MovementType savedMovement;
         private Scrollbar savedHorizontalBar;
         private Scrollbar savedVerticalBar;
@@ -105,7 +108,7 @@ namespace SleepyStudios.LoopScroll
         /// <param name="measureDynamic">是否测量 List 的主轴尺寸；Grid 不支持。</param>
         public void Configure(ScrollRect rect, IReadOnlyList<LoopCellPrefab> prefabs, LoopLayout mode, Vector2 size, bool measureDynamic = false)
         {
-            if (initialized) throw new InvalidOperationException("Configure 必须在首次 SetData 前调用。");
+            if (initialized) throw new InvalidOperationException("Configure 必须在首次提交数据前调用。");
             scrollRect = rect; layout = mode; cellSize = size; dynamicSize = measureDynamic;
             cellPrefabs.Clear();
             for (var i = 0; i < prefabs.Count; i++) cellPrefabs.Add(prefabs[i]);
@@ -156,36 +159,40 @@ namespace SleepyStudios.LoopScroll
             initialized = true;
         }
 
-        /// <summary>单类型简单绑定；位置 Key 仅在当前快照有效。</summary>
-        /// <typeparam name="TItem">业务数据类型。</typeparam>
-        /// <typeparam name="TCell">Prefab 上的组件类型。</typeparam>
-        /// <param name="items">调用方拥有的数据集合；修改后必须通知列表。</param>
-        /// <param name="bind">同步配置 Cell；异步任务使用 context 隔离。</param>
-        /// <param name="unbind">回收时释放业务资源，可为空。</param>
-        /// <param name="options">重载位置策略，默认回到起点。</param>
-        public void SetData<TItem, TCell>(IReadOnlyList<TItem> items, Action<TCell, TItem, CellBindContext> bind,
-            Action<TCell, CellBindContext> unbind = null, ReloadOptions options = default) where TCell : Component
-        { SetData(items, bind, unbind, null, options); }
-
-        /// <summary>带稳定业务 Key 的简单绑定，支持跨 Reload 的锚点和选择。</summary>
-        /// <typeparam name="TItem">业务数据类型。</typeparam>
-        /// <typeparam name="TCell">Prefab 上的组件类型。</typeparam>
-        /// <param name="items">调用方拥有的集合。</param>
-        /// <param name="bind">绑定回调。</param>
-        /// <param name="unbind">解绑回调，可为空。</param>
-        /// <param name="getItemKey">返回非空、唯一且稳定的 Key；不可每次随机生成。</param>
-        /// <param name="options">重载策略。</param>
-        public void SetData<TItem, TCell>(IReadOnlyList<TItem> items, Action<TCell, TItem, CellBindContext> bind,
-            Action<TCell, CellBindContext> unbind, Func<TItem, string> getItemKey, ReloadOptions options = default) where TCell : Component
+        /// <summary>配置一次索引式绑定，随后用 SetTotalCount 提交真实集合。旧绑定仍使用原来的解绑回调。</summary>
+        /// <typeparam name="TCell">类型 0 模板上的组件。</typeparam>
+        /// <param name="bind">业务通过索引读取自己拥有的数据；异步写入先检查 context.IsCurrent。</param>
+        /// <param name="unbind">回收时的清理回调；此时上下文已失效。</param>
+        public void RegisterCellBinding<TCell>(Action<TCell, int, CellBindContext> bind,
+            Action<TCell, CellBindContext> unbind = null) where TCell : Component
         {
-            if (items == null || bind == null) throw new ArgumentNullException(items == null ? nameof(items) : nameof(bind));
-            SetDataSource(new ListDataSource<TItem, TCell>(items, bind, unbind, getItemKey, DefaultItemSize), options);
+            if (bind == null) throw new ArgumentNullException(nameof(bind));
+            if (reconciling || committing || handlingCellCallbacks)
+                throw new InvalidOperationException("Cell 生命周期回调内不能重新注册绑定。");
+            registeredBind = (cell, index, context) =>
+            {
+                var component = cell.GetComponent<TCell>();
+                if (component == null) throw new InvalidOperationException($"Cell Prefab 缺少 {typeof(TCell).FullName}");
+                bind(component, index, context);
+            };
+            registeredUnbind = unbind == null ? null : (cell, context) => unbind(cell.GetComponent<TCell>(), context);
+        }
+
+        /// <summary>提交实际集合并完整重载；null 清空。不会根据集合引用相同而跳过重载。</summary>
+        /// <param name="items">调用方维护的 IList；List&lt;T&gt; 和数组可直接提交。</param>
+        /// <param name="options">默认起点；保持位置或定位指定索引需显式配置。</param>
+        /// <param name="getItemKey">可选稳定业务 Key。选择与保持业务锚点需要此参数。</param>
+        public void SetTotalCount(IList items, RefillOptions options = default, Func<object, string> getItemKey = null)
+        {
+            if (registeredBind == null) throw new InvalidOperationException("请先 RegisterCellBinding，宿主 ItemView 请先注册或配置工厂。");
+            SetDataSource(new ListDataSource(items ?? Array.Empty<object>(), registeredBind,
+                registeredUnbind, getItemKey, DefaultItemSize), options);
         }
 
         /// <summary>提交高级数据源并完整重载；可在 inactive 时调用。</summary>
         /// <param name="dataSource">数据源；其 Count、Key、类型和尺寸必须一致有效。</param>
         /// <param name="options">锚点及定位策略。</param>
-        public void SetDataSource(ILoopDataSource dataSource, ReloadOptions options = default)
+        public void SetDataSource(ILoopDataSource dataSource, RefillOptions options = default)
         {
             if (dataSource == null) throw new ArgumentNullException(nameof(dataSource));
             Initialize();
@@ -194,11 +201,11 @@ namespace SleepyStudios.LoopScroll
 
         /// <summary>重新读取整个数据源并重新绑定；默认回到起点。</summary>
         /// <param name="options">锚点与可选目标索引。</param>
-        public void ReloadData(ReloadOptions options = default)
+        public void RefillCells(RefillOptions options = default)
         { if (source != null) Commit(source, options, false); }
 
-        /// 重新绑定可见项，不改变数量；inactive 时延后到启用。
-        public void RefreshVisible()
+        /// <summary>重新绑定可见项，不改变数量；inactive 时延后到启用。</summary>
+        public void RefreshCells()
         {
             if (reconciling || committing || handlingCellCallbacks) throw new InvalidOperationException("Cell 生命周期回调中不能重入刷新。");
             refreshPending = true; dirty = true; if (isActiveAndEnabled) Reconcile();
@@ -230,7 +237,7 @@ namespace SleepyStudios.LoopScroll
                 }
             }
             if (count != source.Count) throw new InvalidOperationException("变更批次的最终 Count 与数据源不一致。");
-            Commit(source, new ReloadOptions(anchorPolicy), false);
+            Commit(source, new RefillOptions(anchorPolicy), false);
         }
 
         /// <summary>通知已添加到集合末尾的项。</summary>
@@ -258,7 +265,7 @@ namespace SleepyStudios.LoopScroll
             return new Anchor { Key = index >= 0 ? keys[index] : null, Index = index, Position = Offset,
                 Within = index >= 0 ? Offset - ItemStart(index) : 0, OldKeys = keys };
         }
-        private void Commit(ILoopDataSource nextSource, ReloadOptions options, bool sourceChanged)
+        private void Commit(ILoopDataSource nextSource, RefillOptions options, bool sourceChanged)
         {
             if (reconciling || committing || handlingCellCallbacks) throw new InvalidOperationException("Cell 生命周期回调内不能重入结构更新，请在回调结束后提交。");
             committing = true;
@@ -306,7 +313,7 @@ namespace SleepyStudios.LoopScroll
                     followEndDuringMeasurement = options.Index.Value == Count - 1 && options.Alignment == ScrollAlignment.End;
                     SetOffset(TargetOffset(options.Index.Value, options.Alignment));
                 }
-                pendingOptions = !isActiveAndEnabled || ViewportLength <= 0 ? options : (ReloadOptions?)null;
+                pendingOptions = !isActiveAndEnabled || ViewportLength <= 0 ? options : (RefillOptions?)null;
                 dirty = true;
             }
             finally { committing = false; }
@@ -336,10 +343,10 @@ namespace SleepyStudios.LoopScroll
         /// <param name="index">0 到 Count-1。</param>
         /// <param name="alignment">起点、中心或末尾对齐。</param>
         /// <param name="animation">默认立即，平滑动画使用 unscaled time。</param>
-        public void ScrollTo(int index, ScrollAlignment alignment = ScrollAlignment.Start, ScrollAnimation animation = default)
+        public void ScrollToCell(int index, ScrollAlignment alignment = ScrollAlignment.Start, ScrollAnimation animation = default)
         {
             if (index < 0 || index >= Count) throw new ArgumentOutOfRangeException(nameof(index));
-            if (!isActiveAndEnabled || ViewportLength <= 0) { pendingOptions = new ReloadOptions(index, alignment); return; }
+            if (!isActiveAndEnabled || ViewportLength <= 0) { pendingOptions = new RefillOptions(index, alignment); return; }
             ScrollToOffset(TargetOffset(index, alignment), animation);
             alignedKey = keys[index]; alignedAlignment = alignment;
             followEndDuringMeasurement = index == Count - 1 && alignment == ScrollAlignment.End;

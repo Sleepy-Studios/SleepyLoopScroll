@@ -6,40 +6,42 @@
 
 开发：Package Manager → Add package from disk，选择仓库根目录 `package.json`。仓库应放在宿主之外，由本地 Git 独立维护。
 
-发布后：Package Manager → Add package from git URL，使用私有仓库地址 `https://github.com/Sleepy-Studios/SleepyLoopScroll.git#v0.1.0`。需要本机 Git 对私有仓库有访问权限。当前远端/tag 尚未发布，不应把此地址当作已可安装版本。
+初始开发基线已推送至私有仓库 `Sleepy-Studios/SleepyLoopScroll` 的 `codex/v0.1-implementation` 分支。正式发布后可使用 `https://github.com/Sleepy-Studios/SleepyLoopScroll.git#v0.1.0`；目前尚无该标签。私有仓库需要本机 Git 访问权限。
 
 ## 五分钟开始
 
 1. 在 Canvas 下使用 `GameObject → UI → Sleepy Loop Scroll`。
 2. 在隐藏 `CellTemplate` 上添加业务组件，保持根节点 `LoopCell`。
 3. Inspector 配置类型 0 的 Prefab、Cell 尺寸和 Prewarm；Content 不挂 LayoutGroup/ContentSizeFitter。
-4. 业务提交 List 与绑定委托；无需为十万条数据创建十万个对象。
+4. 业务先注册绑定，再提交 List；无需为十万条数据创建十万个对象。
 
 ```csharp
 using SleepyStudios.LoopScroll;
 using UnityEngine.UI;
 
-// Prefab 根节点包含 Image 和 LoopCell；业务自行拥有 items。
-list.SetData<string, Image>(items,
-    (cell, item, context) => cell.color = UnityEngine.Color.white,
-    unbind: null,
-    getItemKey: item => item);
-
-items.Insert(0, "history:42");
-list.Prepend(1); // 稳定 Key + 像素锚点
-list.ScrollTo(20, ScrollAlignment.Center, new ScrollAnimation(.2f));
+// 先注册一次，再提交调用方维护的 List；Prefab 包含 Text 和 LoopCell。
+list.RegisterCellBinding<Text>((cell, index, context) => cell.text = items[index].Title);
+list.SetTotalCount(items, getItemKey: item => ((ItemData)item).Id.ToString());
+list.RefreshCells(); // 重新绑定活跃项
+list.RefillCells(new RefillOptions(20, ScrollAlignment.Center)); // 完整重填并定位
+list.ScrollToCell(20, ScrollAlignment.Center, new ScrollAnimation(.2f));
 ```
 
-Key 必须唯一。真实业务使用 ID，显示文本可以重复；上述字符串仅作为最小示例。集合修改后必须通知列表。
+`SetTotalCount` 接受真实 IList，null 清空；每次完整重填，默认起点。Key 使用唯一稳定业务 ID，不能依赖显示语言。集合修改后用 ApplyChanges、Append/Prepend 或 RefillCells 通知列表；RefreshCells 不更新数量。多类型、动态估算通过 SetDataSource 提交。
 
 ## 示例与文档
 
-Package Manager Samples 导入后直接打开同目录的场景：Basic、MultiType、Chat、CarouselPaging。每个 Sample 独立，无宿主依赖。
+Package Manager → Samples → 导入 **Loop Scroll Showcase**，打开导入目录的 `Main.unity` 即可。主菜单进入基础、多类型、聊天、轮播分页四个真实子场景，每个页面可返回；子场景也能直接运行。首次中文，主菜单 `中文 / English` 切换并记住选择。
+
+Editor 菜单 `Tools/Sleepy Loop Scroll/Open Showcase` 打开主页；`Build Imported Sample Scenes` 重建完整场景组。重建前保存当前场景。导航自动解析导入目录，不需要把示例加入宿主 Build Settings。独立 Player 演示构建需显式包含 Main、Basic、MultiType、Chat、CarouselPaging 五个场景；本包不修改宿主构建配置。
+
+示例中文字库 Noto Sans SC Regular 及字体许可证放在 Showcase/Common/Resources/SleepyLoopScrollSamples；字体授权仅覆盖该字库，不覆盖本包代码。
 
 - [Manual](Documentation~/Manual.md)：层级、Inspector、固定与动态尺寸。
 - [API Reference](Documentation~/APIReference.md)：数据更新、锚点与定位。
 - [Recipes](Documentation~/Recipes.md)：背包、Chat、Carousel、Paging、Nested Scroll。
 - [Migration](Documentation~/Migration.md) 与 [Troubleshooting](Documentation~/Troubleshooting.md)。
+- [当前验收记录](Documentation~/UnifiedValidation.md)。
 - [Architecture](Documentation~/Architecture.md)、[Performance](Documentation~/Performance.md)、[Release Checklist](Documentation~/ReleaseChecklist.md)。
 
 私有阶段不授予开源许可。实现独立设计，不包含付费插件源码。

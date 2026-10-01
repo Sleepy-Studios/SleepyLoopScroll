@@ -1,17 +1,21 @@
-# Migration
+# 钓鱼调用习惯迁移
 
-这里只提供调用语义迁移，不提供旧 LoopScrollRect 二进制兼容层。
+正式用法是先注册一次，再提交真实集合。以下为调用语义对照，迁移时直接修改调用方。
 
-| 旧 API/习惯 | 新 API |
+| 钓鱼用法 | 正式接口 |
 |---|---|
-| SetTotalCount | SetData 或 SetDataSource，直接提交真实集合/数据源。 |
-| RefreshCells | RefreshVisible；数量变化用 ApplyChanges/ReloadData。 |
-| RefillCells | ReloadData(options)，显式指定位置策略。 |
-| ScrollToCell | ScrollTo(index, alignment, animation)。 |
-| forceRefill | 不再需要；空 Cell 和 inactive 恢复是内部生命周期契约。 |
-| 修改 content.anchoredPosition | ScrollTo 或 ScrollAnchorPolicy。 |
-| 平行类型/尺寸/数据集合 | 高级数据源统一回答类型、Key、尺寸。 |
+| RegisterLoopScrollRect<MyItemView>(list, callback) | 宿主同名泛型入口配置工厂，回调统一 `(ItemView,index,CellBindContext)`。 |
+| RegisterLoopScrollClick<MyItemView> | RegisterLoopScrollClick，回调同上；工厂由绑定注册配置。 |
+| RegisterLoopScrollItemHide<MyItemView> | RegisterLoopScrollItemHide，回调 `(ItemView,CellBindContext)`。 |
+| SetTotalCount(items) | 同名提交真实 IList；null 清空，默认起点。 |
+| RefreshCells() | 同名重绑活跃项；数量变化用 RefillCells 或 ApplyChanges。 |
+| RefillCells(index) | RefillCells(new RefillOptions(index))。 |
+| RefillCellsFromEnd() | RefillCells(new RefillOptions(ScrollAnchorPolicy.StickToEnd))。 |
+| ScrollToCell(index) | 同名定位；对齐用 ScrollAlignment，动画用时长。 |
+| autoSelect | 独立 LoopSelectionController，使用稳定 Key。 |
+| 修改 Content 坐标 | ScrollToCell 或锚点策略。 |
+| 平行类型/尺寸集合 | 高级 DataSource 统一回答 Key、类型与尺寸。 |
 
-宿主 ItemView 是普通 C# 类，不能直接作为包 SetData 的 TCell。SleepyDemos 用 Core.Runtime 的 ItemViews().SetItems<TItem,TView>() 薄桥接适配。其它项目自行编写对应桥接，包保持独立。
+包级简单列表使用 RegisterCellBinding<TCell> 配置 Unity Component 绑定；宿主 ItemView 是普通 C# 类，通过 Core.Runtime 的三种注册入口接入。MvcBind 只生成 On{FieldName}RectData/Click/ItemHide；非泛型生成代码需在提交前 ItemViews().Configure<TView>()。所有回调都有 context，同步业务可忽略，异步写入前检查 IsCurrent。
 
-不修改 fishinggameplay。旧调用审计仅用于易用性和行为要求；本包独立设计实现。
+稳定 Key 来自业务 ID，不依赖语言和索引。不恢复 forceRefill、旧速度、多 bool 参数；inactive 和 0 Cell 恢复由生命周期保证。本次不修改 fishinggameplay。

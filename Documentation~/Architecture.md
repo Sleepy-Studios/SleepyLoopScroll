@@ -2,6 +2,10 @@
 
 Runtime 由公开契约、LoopScrollView、LoopCell、尺寸索引和独立扩展组成。Editor 仅配置检查、创建层级与导入示例场景生成；Runtime 不引用 Editor。
 
+RegisterCellBinding/SetTotalCount 的索引模式通过独立数据源适配器进入同一个 Commit/Reconcile 流程。每次提交保存独立的绑定与解绑委托，后来注册新配置不会污染仍活跃的旧绑定。公开 API 只有一套名称，简单集合统一由 ListDataSource 进入虚拟化流程。
+
+Showcase 只位于 Samples~，共享程序集负责示例导航、文本和字库；包 Runtime/Editor 不引用它。Catalog 保存子场景相对路径，Editor 从 Catalog 实际资源位置解析导入目录，Player 从显式构建场景中解析。宿主通过场景目录追加 MvcBind 入口，包不引用宿主。
+
 ScrollRect 拥有原生拖动、速度、弹性和 Scrollbar，LoopScrollView 拥有数据快照、逻辑尺寸、活跃范围、类型池及绝对定位。没有复制或继承改写 ScrollRect。
 
 完整提交先验证下一份 Key/Type/尺寸快照，再取消动画和旧绑定、更新尺寸索引与锚点，最后 reconcile 可见范围。错误批次不改变展示。Insert/Remove 等重建索引为 O(n)；不引入复杂平衡树。

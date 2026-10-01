@@ -14,4 +14,4 @@
 | 分页错误后不继续请求 | Error 需要宿主显式 Retry；Completed 需新查询 ResetBoundary。 |
 | 嵌套手势无效 | Router 放在子 Viewport，确认射线命中和父子引用。 |
 
-绑定失败日志包含 index/key/type。修正业务配置后重新刷新。调用方集合变化不能仅调用 RefreshVisible，否则快照与集合已不一致。
+绑定失败日志包含 index/key/type。修正业务配置后重新刷新。调用方集合变化不能仅调用 RefreshCells，否则快照与集合已不一致。

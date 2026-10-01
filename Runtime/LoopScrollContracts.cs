@@ -20,19 +20,19 @@ namespace SleepyStudios.LoopScroll
         public ScrollAnimation(float duration) { Duration = Mathf.Max(0, duration); }
     }
 
-    public struct ReloadOptions
+    public struct RefillOptions
     {
         public ScrollAnchorPolicy AnchorPolicy;
         public int? Index;
         public ScrollAlignment Alignment;
-        public static ReloadOptions Default => default;
+        public static RefillOptions Default => default;
         /// <summary>指定重载后的锚点策略，默认回到起点。</summary>
         /// <param name="policy">保持位置、可见项或贴底策略。</param>
-        public ReloadOptions(ScrollAnchorPolicy policy) { AnchorPolicy = policy; Index = null; Alignment = default; }
+        public RefillOptions(ScrollAnchorPolicy policy) { AnchorPolicy = policy; Index = null; Alignment = default; }
         /// <summary>重载完成后立即定位索引；边界处钳制。</summary>
         /// <param name="index">数据索引。</param>
         /// <param name="alignment">相对 Viewport 的对齐。</param>
-        public ReloadOptions(int index, ScrollAlignment alignment = ScrollAlignment.Start)
+        public RefillOptions(int index, ScrollAlignment alignment = ScrollAlignment.Start)
         { AnchorPolicy = default; Index = index; Alignment = alignment; }
     }
 
