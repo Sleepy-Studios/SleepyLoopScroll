@@ -5,6 +5,18 @@ namespace SleepyStudios.LoopScroll
 {
     public enum LoopLayout { Vertical, Horizontal, VerticalGrid, HorizontalGrid }
     public enum ScrollAlignment { Start, Center, End }
+    public enum ScrollStatus { Completed, Canceled }
+    public enum ScrollCancelReason { None, Replaced, DragStarted, ExplicitCancel, DataChanged, Disabled, Destroyed, ViewportUnavailable }
+
+    public readonly struct ScrollResult
+    {
+        /// 本次定位的唯一终止状态。
+        public ScrollStatus Status { get; }
+        /// 完成时为 None；取消时记录首次终止原因。
+        public ScrollCancelReason CancelReason { get; }
+        internal ScrollResult(ScrollStatus status, ScrollCancelReason cancelReason)
+        { Status = status; CancelReason = cancelReason; }
+    }
     public enum ScrollAnchorPolicy { ResetToStart, KeepPosition, KeepFirstVisible, StickToEnd }
     public enum LoopListChangeKind { Insert, Remove, Replace, Move }
     public enum PagingState { Idle, Loading, Completed, Error }
@@ -16,8 +28,8 @@ namespace SleepyStudios.LoopScroll
         [Min(0)] public float Duration;
         public static ScrollAnimation Immediate => default;
         /// <summary>使用 unscaled time 和 SmoothStep 平滑定位。</summary>
-        /// <param name="duration">动画秒数，非正数表示立即定位。</param>
-        public ScrollAnimation(float duration) { Duration = Mathf.Max(0, duration); }
+        /// <param name="duration">有限非正数表示立即定位；非有限值在提交定位时同步报错。</param>
+        public ScrollAnimation(float duration) { Duration = duration; }
     }
 
     public struct RefillOptions

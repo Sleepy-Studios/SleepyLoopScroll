@@ -365,6 +365,312 @@ namespace SleepyStudios.LoopScroll.Tests
             public void BindCell(LoopCell cell, int index, CellBindContext context) { }
             public void UnbindCell(LoopCell cell, CellBindContext context) { }
         }
+        private static void AssertCompleted(ScrollResult result)
+        { Assert.That(result.Status, Is.EqualTo(ScrollStatus.Completed)); Assert.That(result.CancelReason, Is.EqualTo(ScrollCancelReason.None)); }
+        private static void AssertCanceled(ScrollResult result, ScrollCancelReason reason)
+        { Assert.That(result.Status, Is.EqualTo(ScrollStatus.Canceled)); Assert.That(result.CancelReason, Is.EqualTo(reason)); }
+        private static IEnumerator UntilFinished(Func<bool> finished)
+        {
+            var until = Time.realtimeSinceStartup + 3;
+            while (!finished() && Time.realtimeSinceStartup < until) yield return null;
+            Assert.That(finished(), Is.True, "定位未在布局稳定后终止");
+        }
+        [UnityTest]
+        public IEnumerator OffsetMatrixCoversListsGridsAlignmentsAnimationAndClamping()
+        {
+            foreach (var mode in new[] { LoopLayout.Vertical, LoopLayout.Horizontal, LoopLayout.VerticalGrid, LoopLayout.HorizontalGrid })
+            {
+                Create(mode); Populate(200); Submit(); yield return null;
+                var axis = list.IsVertical ? 40f : 100f;
+                var viewport = list.IsVertical ? 200f : 300f;
+                var lanes = mode == LoopLayout.VerticalGrid ? 3 : mode == LoopLayout.HorizontalGrid ? 5 : 1;
+                foreach (ScrollAlignment alignment in Enum.GetValues(typeof(ScrollAlignment)))
+                foreach (var pixels in new[] { -25f, 25f })
+                foreach (var duration in new[] { 0f, .03f })
+                {
+                    list.ScrollToCell(0);
+                    var target = 60 / lanes * axis - (alignment == ScrollAlignment.Start ? 0 :
+                        (viewport - axis) * (alignment == ScrollAlignment.Center ? .5f : 1)) - pixels;
+                    var calls = 0;
+                    list.ScrollToCell(60, alignment, new ScrollAnimation(duration), pixels, result =>
+                    { AssertCompleted(result); Assert.That(list.Offset, Is.EqualTo(target).Within(1)); Assert.That(list.GetVisibleCell(60), Is.Not.Null); calls++; });
+                    if (duration == 0) Assert.That(calls, Is.EqualTo(1));
+                    yield return UntilFinished(() => calls > 0);
+                    Assert.That(calls, Is.EqualTo(1)); Assert.That(list.IsAnimating, Is.False);
+                }
+                var boundaries = 0;
+                list.ScrollToCell(0, offsetPixels: 1000, onFinished: result => { AssertCompleted(result); boundaries++; });
+                Assert.That(list.Offset, Is.Zero.Within(1));
+                list.ScrollToCell(199, ScrollAlignment.End, offsetPixels: -1000, onFinished: result => { AssertCompleted(result); boundaries++; });
+                Assert.That(list.Offset, Is.EqualTo(list.MaxOffset).Within(1)); Assert.That(boundaries, Is.EqualTo(2));
+                Cleanup();
+            }
+        }
+        [UnityTest]
+        public IEnumerator InvalidRequestsPreserveAnimationAndSuccessfulReplacementNotifiesOnce()
+        {
+            Create(); Populate(100); Submit(); yield return null;
+            var oldCalls = 0; var newCalls = 0;
+            list.ScrollToCell(60, animation: new ScrollAnimation(10), onFinished: result => { AssertCanceled(result, ScrollCancelReason.Replaced); oldCalls++; });
+            Assert.Throws<ArgumentOutOfRangeException>(() => list.ScrollToCell(-1));
+            Assert.Throws<ArgumentOutOfRangeException>(() => list.ScrollToCell(100));
+            foreach (var invalid in new[] { float.NaN, float.PositiveInfinity, float.NegativeInfinity })
+            {
+                Assert.Throws<ArgumentOutOfRangeException>(() => list.ScrollToCell(20, offsetPixels: invalid));
+                Assert.Throws<ArgumentOutOfRangeException>(() => list.ScrollToOffset(invalid));
+                Assert.Throws<ArgumentOutOfRangeException>(() => list.ScrollToCell(20, animation: new ScrollAnimation(invalid)));
+                Assert.Throws<ArgumentOutOfRangeException>(() => list.ScrollToOffset(100, new ScrollAnimation { Duration = invalid }));
+            }
+            Assert.That(oldCalls, Is.Zero); Assert.That(list.IsAnimating, Is.True);
+            list.ScrollToOffset(640, new ScrollAnimation(-1), result => { AssertCompleted(result); newCalls++; });
+            Assert.That(oldCalls, Is.EqualTo(1)); Assert.That(newCalls, Is.EqualTo(1));
+            list.CancelAnimation(); yield return null; Assert.That(newCalls, Is.EqualTo(1));
+        }
+        [UnityTest]
+        public IEnumerator ExplicitCancelStopsPositionAndCancelsWaitingRequestOnce()
+        {
+            Create(); Populate(100); Submit(); yield return null;
+            var calls = 0;
+            Action<ScrollResult> canceled = result => { AssertCanceled(result, ScrollCancelReason.ExplicitCancel); calls++; };
+            list.ScrollToCell(80, animation: new ScrollAnimation(1), onFinished: canceled); yield return null;
+            list.CancelAnimation(); var stopped = list.Offset; list.CancelAnimation();
+            yield return new WaitForSecondsRealtime(.1f);
+            Assert.That(list.Offset, Is.EqualTo(stopped).Within(1)); Assert.That(calls, Is.EqualTo(1));
+            list.gameObject.SetActive(false); list.ScrollToOffset(1000, new ScrollAnimation(1), canceled);
+            Assert.That(list.IsAnimating, Is.False); list.CancelAnimation(); list.gameObject.SetActive(true);
+            yield return null; yield return null; Assert.That(calls, Is.EqualTo(2)); Assert.That(list.Offset, Is.EqualTo(stopped).Within(1));
+        }
+        [UnityTest]
+        public IEnumerator DragCancellationHandsPositionToNativeScrollRect()
+        {
+            Create(); Populate(100); Submit(); yield return null; list.ScrollToCell(20);
+            var events = new GameObject("ScrollRequestEvents", typeof(EventSystem));
+            try
+            {
+                var calls = 0;
+                list.ScrollToCell(80, animation: new ScrollAnimation(1), onFinished: result => { AssertCanceled(result, ScrollCancelReason.DragStarted); calls++; });
+                var pointer = new PointerEventData(events.GetComponent<EventSystem>()) { button = PointerEventData.InputButton.Left, position = new Vector2(200, 200) };
+                scroll.OnBeginDrag(pointer); list.OnBeginDrag(pointer);
+                var before = list.Offset; pointer.position += Vector2.up * 40; scroll.OnDrag(pointer);
+                Assert.That(list.Offset, Is.EqualTo(before + 40).Within(1));
+                scroll.OnEndDrag(pointer); list.OnEndDrag(pointer); yield return null;
+                Assert.That(calls, Is.EqualTo(1)); Assert.That(list.IsAnimating, Is.False);
+            }
+            finally { UnityEngine.Object.DestroyImmediate(events); }
+        }
+        [UnityTest]
+        public IEnumerator DataChangesCancelOnlyAfterSuccessfulValidationAndPermitCallbackRefill()
+        {
+            Create(); Populate(100); Submit(); yield return null;
+            var calls = 0;
+            list.ScrollToCell(80, animation: new ScrollAnimation(10), onFinished: result =>
+            { AssertCanceled(result, ScrollCancelReason.DataChanged); Assert.That(list.Count, Is.EqualTo(101)); calls++; list.ScrollToCell(30); });
+            items.Add(items[0]); Assert.Throws<InvalidOperationException>(() => list.RefillCells()); items.RemoveAt(items.Count - 1);
+            Assert.Throws<ArgumentOutOfRangeException>(() => list.RefillCells(new RefillOptions(999)));
+            Assert.That(calls, Is.Zero); list.RefreshCells(); Assert.That(list.IsAnimating, Is.True);
+            items.Add("added"); list.Append(1); Assert.That(calls, Is.EqualTo(1)); Assert.That(list.Offset, Is.EqualTo(1200).Within(1));
+            foreach (var operation in new Action[] { () => Submit(), () => list.RefillCells(), () => list.ApplyChanges(new[] { LoopListChange.Replace(0) }) })
+            {
+                list.ScrollToCell(80, animation: new ScrollAnimation(10), onFinished: result =>
+                { AssertCanceled(result, ScrollCancelReason.DataChanged); calls++; list.RefillCells(new RefillOptions(20)); });
+                operation(); Assert.That(list.Offset, Is.EqualTo(800).Within(1));
+            }
+            Assert.That(calls, Is.EqualTo(4)); yield return null;
+        }
+        [UnityTest]
+        public IEnumerator InactiveAndZeroAxisRequestsRetainAlignmentOffsetAndFullAnimationDuration()
+        {
+            foreach (var state in new[] { 0, 1, 2 })
+            {
+                Create(); Populate(100); Submit(); yield return null;
+                if (state == 0) list.gameObject.SetActive(false);
+                else scroll.viewport.sizeDelta = state == 1 ? new Vector2(0, 200) : new Vector2(300, 0);
+                var replaced = 0; var completed = 0;
+                list.ScrollToCell(30, onFinished: result => { AssertCanceled(result, ScrollCancelReason.Replaced); replaced++; });
+                list.ScrollToCell(50, ScrollAlignment.Center, new ScrollAnimation(.3f), 25, result => { AssertCompleted(result); completed++; });
+                yield return null; Assert.That(replaced, Is.EqualTo(1)); Assert.That(completed, Is.Zero); Assert.That(list.IsAnimating, Is.False);
+                scroll.viewport.sizeDelta = new Vector2(300, 200); list.gameObject.SetActive(true);
+                yield return null; yield return null;
+                Assert.That(list.IsAnimating, Is.True); Assert.That(completed, Is.Zero);
+                yield return UntilFinished(() => completed > 0);
+                Assert.That(list.Offset, Is.EqualTo(1895).Within(1)); Assert.That(completed, Is.EqualTo(1)); Cleanup();
+            }
+            Create(); Populate(100); Submit(); list.gameObject.SetActive(false);
+            var offsetCalls = 0; list.ScrollToOffset(777, new ScrollAnimation(.15f), result => { AssertCompleted(result); offsetCalls++; });
+            list.gameObject.SetActive(true); yield return UntilFinished(() => offsetCalls > 0);
+            Assert.That(list.Offset, Is.EqualTo(777).Within(1)); Assert.That(offsetCalls, Is.EqualTo(1));
+            list.gameObject.SetActive(false); Submit(new RefillOptions(10)); list.gameObject.SetActive(true);
+            var immediate = 0;
+            list.ScrollToCell(20, onFinished: result => { AssertCompleted(result); immediate++; });
+            yield return null; yield return null;
+            Assert.That(immediate, Is.EqualTo(1)); Assert.That(list.Offset, Is.EqualTo(800).Within(1));
+        }
+        [UnityTest]
+        public IEnumerator DisabledDestroyedAndUnavailableRequestsTerminateExactlyOnce()
+        {
+            foreach (var kind in new[] { 0, 1, 2, 3, 4 })
+            {
+                Create(); Populate(100); Submit(); yield return null;
+                var calls = 0; var reason = ScrollCancelReason.None;
+                list.ScrollToCell(80, animation: new ScrollAnimation(1), onFinished: result =>
+                { Assert.That(result.Status, Is.EqualTo(ScrollStatus.Canceled)); reason = result.CancelReason; calls++; });
+                if (kind == 0) list.enabled = false;
+                else if (kind == 1) UnityEngine.Object.Destroy(list.gameObject);
+                else if (kind == 2) scroll.viewport.sizeDelta = new Vector2(0, 200);
+                else if (kind == 3) scroll.viewport.sizeDelta = new Vector2(300, 0);
+                else { list.CancelAnimation(); UnityEngine.Object.Destroy(list.gameObject); }
+                yield return null; yield return null;
+                Assert.That(calls, Is.EqualTo(1));
+                Assert.That(reason, Is.EqualTo(kind < 2 ? ScrollCancelReason.Disabled : kind < 4 ? ScrollCancelReason.ViewportUnavailable : ScrollCancelReason.ExplicitCancel));
+                if (list != null) { list.enabled = true; scroll.viewport.sizeDelta = new Vector2(300, 200); }
+                yield return null; Assert.That(calls, Is.EqualTo(1)); Cleanup();
+            }
+            Create(); Populate(100); Submit(); yield return null; list.gameObject.SetActive(false);
+            var destroyed = 0;
+            list.ScrollToOffset(500, onFinished: result => { AssertCanceled(result, ScrollCancelReason.Destroyed); destroyed++; });
+            UnityEngine.Object.Destroy(list.gameObject); yield return null; Assert.That(destroyed, Is.EqualTo(1));
+        }
+        [UnityTest]
+        public IEnumerator FinishedCallbacksCanStartRequestsAndExceptionsDoNotCorruptState()
+        {
+            Create(); Populate(100); Submit(); yield return null;
+            var results = new List<int>();
+            list.ScrollToCell(50, onFinished: result =>
+            {
+                AssertCompleted(result); results.Add(1);
+                list.ScrollToCell(70, animation: new ScrollAnimation(.05f), offsetPixels: -20,
+                    onFinished: next => { AssertCompleted(next); results.Add(2); });
+            });
+            Assert.That(list.IsAnimating, Is.True); yield return UntilFinished(() => results.Count == 2);
+            Assert.That(list.Offset, Is.EqualTo(2820).Within(1));
+            list.ScrollToCell(80, animation: new ScrollAnimation(10), onFinished: result =>
+            {
+                AssertCanceled(result, ScrollCancelReason.Replaced);
+                list.ScrollToCell(20, onFinished: next => { AssertCompleted(next); results.Add(3); });
+            });
+            list.ScrollToCell(40, animation: new ScrollAnimation(10), onFinished: result => { AssertCanceled(result, ScrollCancelReason.Replaced); results.Add(4); });
+            CollectionAssert.AreEqual(new[] { 1, 2, 4, 3 }, results); Assert.That(list.Offset, Is.EqualTo(800).Within(1));
+            LogAssert.Expect(LogType.Exception, new System.Text.RegularExpressions.Regex("InvalidOperationException: scroll callback probe"));
+            list.ScrollToCell(10, onFinished: result => { list.ScrollToCell(60, animation: new ScrollAnimation(.05f)); throw new InvalidOperationException("scroll callback probe"); });
+            Assert.That(list.IsAnimating, Is.True); yield return new WaitForSecondsRealtime(.15f);
+            Assert.That(list.Offset, Is.EqualTo(2400).Within(1)); list.ScrollToCell(5); Assert.That(list.Offset, Is.EqualTo(200).Within(1));
+        }
+        [UnityTest]
+        public IEnumerator CellCancellationNotificationRunsAfterCellCallbackGuards()
+        {
+            Create(registerBinding: false); Populate(100);
+            var inside = false; var armed = false; var calls = 0;
+            list.RegisterCellBinding<Image>((cell, index, context) =>
+            {
+                if (!armed) return;
+                inside = true; armed = false; list.CancelAnimation(); Assert.That(calls, Is.Zero); inside = false;
+            });
+            Submit(); yield return null; armed = true;
+            list.ScrollToCell(80, animation: new ScrollAnimation(10), onFinished: result =>
+            { AssertCanceled(result, ScrollCancelReason.ExplicitCancel); Assert.That(inside, Is.False); calls++; list.RefillCells(new RefillOptions(20)); });
+            list.RefreshCells(); Assert.That(calls, Is.EqualTo(1)); Assert.That(list.Offset, Is.EqualTo(800).Within(1));
+        }
+        [UnityTest]
+        public IEnumerator ClickCancellationDefersNotificationWithoutRestrictingClickDataUpdates()
+        {
+            Create(); Populate(100); Submit(); yield return null;
+            var inside = false; var calls = 0;
+            list.CellClicked += (cell, context) =>
+            {
+                inside = true; list.CancelAnimation(); Assert.That(calls, Is.Zero);
+                list.RefillCells(new RefillOptions(20)); inside = false;
+            };
+            list.ScrollToCell(80, animation: new ScrollAnimation(10), onFinished: result =>
+            { AssertCanceled(result, ScrollCancelReason.ExplicitCancel); Assert.That(inside, Is.False); calls++; list.ScrollToCell(30); });
+            var events = new GameObject("ClickRequestEvents", typeof(EventSystem));
+            try { list.GetVisibleCell(0).OnPointerClick(new PointerEventData(events.GetComponent<EventSystem>())); }
+            finally { UnityEngine.Object.DestroyImmediate(events); }
+            Assert.That(calls, Is.EqualTo(1)); Assert.That(list.Offset, Is.EqualTo(1200).Within(1));
+        }
+        [UnityTest]
+        public IEnumerator DynamicImmediateRemeasuresBeforeCompletionAndDisableCancelsConvergence()
+        {
+            Create(dynamic: true); Populate(100);
+            list.RegisterCellBinding<LayoutElement>((cell, index, context) => cell.preferredHeight = 80); Submit();
+            yield return null; yield return null;
+            var calls = 0;
+            list.ScrollToCell(50, ScrollAlignment.End, offsetPixels: -20, onFinished: result =>
+            {
+                AssertCompleted(result); calls++;
+                var target = list.GetVisibleCell(50).RectTransform;
+                Assert.That(-target.anchoredPosition.y - list.Offset, Is.EqualTo(60).Within(1));
+            });
+            var element = list.GetVisibleCell(50).GetComponent<LayoutElement>(); element.preferredHeight = 120;
+            list.InvalidateCellSize(50); Assert.That(calls, Is.Zero);
+            yield return UntilFinished(() => calls > 0); Assert.That(calls, Is.EqualTo(1));
+            list.ScrollToCell(10, onFinished: result => { AssertCanceled(result, ScrollCancelReason.Disabled); calls++; });
+            Assert.That(list.IsAnimating, Is.False); list.enabled = false; Assert.That(calls, Is.EqualTo(2));
+            list.enabled = true; yield return null; yield return null; Assert.That(calls, Is.EqualTo(2));
+        }
+        [UnityTest]
+        public IEnumerator DynamicRequestKeepsOffsetThroughMeasurementRefreshResizeAndDoesNotRenotify()
+        {
+            foreach (var mode in new[] { LoopLayout.Vertical, LoopLayout.Horizontal })
+            foreach (ScrollAlignment alignment in Enum.GetValues(typeof(ScrollAlignment)))
+            foreach (var pixels in new[] { -25f, 25f })
+            {
+                Create(mode, dynamic: true); Populate(100);
+                var preferred = list.IsVertical ? 80f : 140f;
+                list.RegisterCellBinding<LayoutElement>((cell, index, context) => { cell.preferredHeight = preferred; cell.preferredWidth = preferred; });
+                Submit(); yield return null; yield return null;
+                var calls = 0;
+                list.ScrollToCell(50, alignment, new ScrollAnimation(.15f), pixels, result =>
+                {
+                    AssertCompleted(result); calls++;
+                    var target = list.GetVisibleCell(50).RectTransform;
+                    var length = list.ViewportLength;
+                    var line = alignment == ScrollAlignment.Start ? 0 : (length - preferred) * (alignment == ScrollAlignment.Center ? .5f : 1);
+                    var local = list.IsVertical ? -target.anchoredPosition.y - list.Offset : target.anchoredPosition.x - list.Offset;
+                    Assert.That(local, Is.EqualTo(line + pixels).Within(1));
+                });
+                yield return null; list.RefreshCells();
+                var cell50 = list.GetVisibleCell(50);
+                if (cell50 != null) { preferred += 20; cell50.GetComponent<LayoutElement>().preferredHeight = preferred; cell50.GetComponent<LayoutElement>().preferredWidth = preferred; list.InvalidateCellSize(50); }
+                scroll.viewport.sizeDelta = new Vector2(280, 180);
+                yield return UntilFinished(() => calls > 0); Assert.That(calls, Is.EqualTo(1));
+                var targetAfter = list.GetVisibleCell(50); targetAfter.GetComponent<LayoutElement>().preferredHeight += 20;
+                targetAfter.GetComponent<LayoutElement>().preferredWidth += 20; list.InvalidateCellSize(50);
+                yield return null; yield return null; Assert.That(calls, Is.EqualTo(1)); Cleanup();
+            }
+        }
+        [UnityTest]
+        public IEnumerator DynamicImmediateNotifiesAfterStableVisibleLayout()
+        {
+            Create(dynamic: true); Populate(100);
+            list.RegisterCellBinding<LayoutElement>((cell, index, context) => cell.preferredHeight = 80); Submit();
+            var calls = 0;
+            list.ScrollToCell(50, ScrollAlignment.Center, offsetPixels: 30, onFinished: result =>
+            { AssertCompleted(result); calls++; Assert.That(list.GetVisibleCell(50).RectTransform.anchoredPosition.y + list.Offset, Is.EqualTo(-90).Within(1)); });
+            Assert.That(calls, Is.Zero); Assert.That(list.IsAnimating, Is.False);
+            yield return UntilFinished(() => calls > 0); Assert.That(calls, Is.EqualTo(1));
+        }
+        [UnityTest]
+        public IEnumerator CarouselOffsetRequestCompletesBeforeCoordinateRecenterAndStillSnaps()
+        {
+            Create(LoopLayout.Horizontal); var carousel = list.gameObject.AddComponent<LoopCarouselController>();
+            carousel.Configure(300, 0, .05f); Populate(5); Submit(); yield return null; yield return null;
+            var completed = 0;
+            list.ScrollToOffset(-300, new ScrollAnimation(.05f), result => { AssertCompleted(result); Assert.That(list.Offset, Is.EqualTo(-300).Within(1)); completed++; });
+            yield return UntilFinished(() => completed > 0); Assert.That(completed, Is.EqualTo(1));
+            carousel.Next(); yield return new WaitForSecondsRealtime(.15f);
+            Assert.That(Mathf.Abs(list.Offset), Is.LessThan(1500));
+            var events = new GameObject("CarouselRequestEvents", typeof(EventSystem));
+            try
+            {
+                var canceled = 0; var pointer = new PointerEventData(events.GetComponent<EventSystem>());
+                list.ScrollToOffset(12000, new ScrollAnimation(1), result => { AssertCanceled(result, ScrollCancelReason.DragStarted); canceled++; });
+                list.OnBeginDrag(pointer); list.OnEndDrag(pointer); scroll.StopMovement();
+                yield return new WaitForSecondsRealtime(.15f);
+                Assert.That(canceled, Is.EqualTo(1)); Assert.That(completed, Is.EqualTo(1)); Assert.That(list.IsAnimating, Is.False);
+                Assert.That(list.Offset, Is.EqualTo(carousel.CurrentPage * 300).Within(1));
+            }
+            finally { UnityEngine.Object.DestroyImmediate(events); }
+        }
         [UnityTest]
         public IEnumerator WarmRegisteredScrollingSixtySecondsAllocatesNoPluginMemory()
         {

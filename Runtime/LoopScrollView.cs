@@ -61,6 +61,25 @@ namespace SleepyStudios.LoopScroll
         private string alignedKey;
         private ScrollAlignment alignedAlignment;
         private bool followEndDuringMeasurement;
+        // 请求保存在值字段中；无回调定位不创建请求对象或逐次闭包。
+        private bool hasScrollRequest;
+        private bool scrollPending;
+        private int scrollIndex;
+        private ScrollAlignment scrollAlignment;
+        private float scrollOffsetPixels;
+        private float scrollOffset;
+        private float scrollDuration;
+        private int scrollStartedFrame;
+        private Action<ScrollResult> scrollFinished;
+        private int scrollOperationDepth;
+        private bool notifyingScroll;
+        private bool destroying;
+        private readonly List<ScrollNotification> scrollNotifications = new List<ScrollNotification>(4);
+        private struct ScrollNotification
+        {
+            public Action<ScrollResult> Callback;
+            public ScrollResult Result;
+        }
 
         public event Action<LoopCell, CellBindContext> CellBound;
         public event Action<LoopCell, CellBindContext> CellUnbound;
@@ -74,6 +93,7 @@ namespace SleepyStudios.LoopScroll
         public bool IsGrid => layout == LoopLayout.VerticalGrid || layout == LoopLayout.HorizontalGrid;
         public bool HasStableKeys => source != null && source.HasStableKeys;
         public bool IsDragging { get; private set; }
+        /// 仅表示插值动画正在运行；等待执行和布局收敛通过定位回调判断结束。
         public bool IsAnimating => animationDuration > 0;
         public bool IsLooping => looping;
         public int Count => keys.Length;
@@ -268,57 +288,63 @@ namespace SleepyStudios.LoopScroll
         private void Commit(ILoopDataSource nextSource, RefillOptions options, bool sourceChanged)
         {
             if (reconciling || committing || handlingCellCallbacks) throw new InvalidOperationException("Cell 生命周期回调内不能重入结构更新，请在回调结束后提交。");
-            committing = true;
+            scrollOperationDepth++;
             try
             {
-                if (nextSource.Count < 0) throw new InvalidOperationException("Count 不能为负。");
-                if (options.AnchorPolicy == ScrollAnchorPolicy.KeepFirstVisible && !nextSource.HasStableKeys && Count > 0)
-                    throw new InvalidOperationException("保持可见业务项需要稳定 Key selector。");
-                var count = nextSource.Count;
-                var nextKeys = new string[count];
-                var nextTypes = new int[count];
-                var nextSizes = new float[count];
-                var nextIndices = new Dictionary<string, int>(count, StringComparer.Ordinal);
-                // 先构建并验证完整快照，错误不会破坏当前展示。
-                for (var i = 0; i < count; i++)
+                committing = true;
+                try
                 {
-                    var key = nextSource.GetItemKey(i);
-                    var type = nextSource.GetCellType(i);
-                    var estimate = nextSource.GetEstimatedSize(i, CrossSize);
-                    if (string.IsNullOrEmpty(key) || nextIndices.ContainsKey(key)) throw new InvalidOperationException($"Key 为空或重复：index={i}, key={key}");
-                    if (!pools.ContainsKey(type)) throw new InvalidOperationException($"未配置 Cell 类型：index={i}, type={type}");
-                    if (!Finite(estimate) || estimate <= 0) throw new InvalidOperationException($"估算尺寸必须为有限正数：index={i}");
-                    nextIndices.Add(key, i); nextKeys[i] = key; nextTypes[i] = type;
-                    nextSizes[i] = (dynamicSize && !sourceChanged && measuredSizes.TryGetValue(key, out var measured) ? measured : dynamicSize ? estimate : DefaultItemSize) + AxisSpacing;
+                    if (nextSource.Count < 0) throw new InvalidOperationException("Count 不能为负。");
+                    if (options.AnchorPolicy == ScrollAnchorPolicy.KeepFirstVisible && !nextSource.HasStableKeys && Count > 0)
+                        throw new InvalidOperationException("保持可见业务项需要稳定 Key selector。");
+                    var count = nextSource.Count;
+                    var nextKeys = new string[count];
+                    var nextTypes = new int[count];
+                    var nextSizes = new float[count];
+                    var nextIndices = new Dictionary<string, int>(count, StringComparer.Ordinal);
+                    // 先构建并验证完整快照，错误不会破坏当前展示。
+                    for (var i = 0; i < count; i++)
+                    {
+                        var key = nextSource.GetItemKey(i);
+                        var type = nextSource.GetCellType(i);
+                        var estimate = nextSource.GetEstimatedSize(i, CrossSize);
+                        if (string.IsNullOrEmpty(key) || nextIndices.ContainsKey(key)) throw new InvalidOperationException($"Key 为空或重复：index={i}, key={key}");
+                        if (!pools.ContainsKey(type)) throw new InvalidOperationException($"未配置 Cell 类型：index={i}, type={type}");
+                        if (!Finite(estimate) || estimate <= 0) throw new InvalidOperationException($"估算尺寸必须为有限正数：index={i}");
+                        nextIndices.Add(key, i); nextKeys[i] = key; nextTypes[i] = type;
+                        nextSizes[i] = (dynamicSize && !sourceChanged && measuredSizes.TryGetValue(key, out var measured) ? measured : dynamicSize ? estimate : DefaultItemSize) + AxisSpacing;
+                    }
+                    if (options.Index.HasValue && (options.Index.Value < 0 || options.Index.Value >= count)) throw new ArgumentOutOfRangeException(nameof(options));
+                    var anchor = CaptureAnchor();
+                    EndScroll(ScrollCancelReason.DataChanged);
+                    animationDuration = 0; alignedKey = null;
+                    followEndDuringMeasurement = options.AnchorPolicy == ScrollAnchorPolicy.StickToEnd;
+                    RecycleAll();
+                    if (sourceChanged) measuredSizes.Clear();
+                    else
+                    {
+                        var removed = new List<string>();
+                        foreach (var pair in measuredSizes) if (!nextIndices.ContainsKey(pair.Key)) removed.Add(pair.Key);
+                        for (var i = 0; i < removed.Count; i++) measuredSizes.Remove(removed[i]);
+                    }
+                    source = nextSource; keys = nextKeys; types = nextTypes; indices = nextIndices;
+                    sizes.Reset(nextSizes, count); invalidSizes.Clear();
+                    UpdateContentSize();
+                    RestoreAnchor(anchor, options.AnchorPolicy);
+                    if (options.Index.HasValue)
+                    {
+                        alignedKey = keys[options.Index.Value]; alignedAlignment = options.Alignment;
+                        followEndDuringMeasurement = options.Index.Value == Count - 1 && options.Alignment == ScrollAlignment.End;
+                        SetOffset(TargetOffset(options.Index.Value, options.Alignment));
+                    }
+                    pendingOptions = !isActiveAndEnabled || !HasViewport ? options : (RefillOptions?)null;
+                    dirty = true;
                 }
-                if (options.Index.HasValue && (options.Index.Value < 0 || options.Index.Value >= count)) throw new ArgumentOutOfRangeException(nameof(options));
-                var anchor = CaptureAnchor();
-                CancelAnimation();
-                followEndDuringMeasurement = options.AnchorPolicy == ScrollAnchorPolicy.StickToEnd;
-                RecycleAll();
-                if (sourceChanged) measuredSizes.Clear();
-                else
-                {
-                    var removed = new List<string>();
-                    foreach (var pair in measuredSizes) if (!nextIndices.ContainsKey(pair.Key)) removed.Add(pair.Key);
-                    for (var i = 0; i < removed.Count; i++) measuredSizes.Remove(removed[i]);
-                }
-                source = nextSource; keys = nextKeys; types = nextTypes; indices = nextIndices;
-                sizes.Reset(nextSizes, count); invalidSizes.Clear();
-                UpdateContentSize();
-                RestoreAnchor(anchor, options.AnchorPolicy);
-                if (options.Index.HasValue)
-                {
-                    alignedKey = keys[options.Index.Value]; alignedAlignment = options.Alignment;
-                    followEndDuringMeasurement = options.Index.Value == Count - 1 && options.Alignment == ScrollAlignment.End;
-                    SetOffset(TargetOffset(options.Index.Value, options.Alignment));
-                }
-                pendingOptions = !isActiveAndEnabled || ViewportLength <= 0 ? options : (RefillOptions?)null;
-                dirty = true;
+                finally { committing = false; }
+                if (isActiveAndEnabled) Reconcile();
+                DataChanged?.Invoke();
             }
-            finally { committing = false; }
-            if (isActiveAndEnabled) Reconcile();
-            DataChanged?.Invoke();
+            finally { scrollOperationDepth--; NotifyScroll(); }
         }
 
         private void RestoreAnchor(Anchor anchor, ScrollAnchorPolicy policy)
@@ -339,31 +365,110 @@ namespace SleepyStudios.LoopScroll
             SetOffset(position);
         }
 
-        /// <summary>定位数据索引；边界钳制，新请求取消旧动画。</summary>
-        /// <param name="index">0 到 Count-1。</param>
+        /// <summary>定位数据索引；有效新请求替代旧请求，inactive 或零尺寸时等待恢复。</summary>
+        /// <param name="index">0 到 Count-1；无效索引同步报错且保留旧请求。</param>
         /// <param name="alignment">起点、中心或末尾对齐。</param>
-        /// <param name="animation">默认立即，平滑动画使用 unscaled time。</param>
-        public void ScrollToCell(int index, ScrollAlignment alignment = ScrollAlignment.Start, ScrollAnimation animation = default)
+        /// <param name="animation">默认立即，有限非正时长立即定位；非有限时长同步报错。</param>
+        /// <param name="offsetPixels">最终位置为对齐位置减此值，再钳制；正值使目标向下或右移动。</param>
+        /// <param name="onFinished">布局稳定后完成或首次取消时通知一次；通知允许再次定位，异常记录日志。</param>
+        public void ScrollToCell(int index, ScrollAlignment alignment = ScrollAlignment.Start, ScrollAnimation animation = default,
+            float offsetPixels = 0, Action<ScrollResult> onFinished = null)
         {
             if (index < 0 || index >= Count) throw new ArgumentOutOfRangeException(nameof(index));
-            if (!isActiveAndEnabled || ViewportLength <= 0) { pendingOptions = new RefillOptions(index, alignment); return; }
-            ScrollToOffset(TargetOffset(index, alignment), animation);
-            alignedKey = keys[index]; alignedAlignment = alignment;
-            followEndDuringMeasurement = index == Count - 1 && alignment == ScrollAlignment.End;
-            // 立即定位的首轮测量已经执行过；按实测尺寸再纠正一次对齐。
-            if (dynamicSize && !IsAnimating) { SetOffset(TargetOffset(index, alignment)); Reconcile(); }
+            if (!Finite(offsetPixels)) throw new ArgumentOutOfRangeException(nameof(offsetPixels));
+            ValidateAnimation(animation);
+            BeginScroll(index, alignment, offsetPixels, 0, animation.Duration, onFinished);
         }
-        /// <summary>定位逻辑偏移；有限列表自动钳制，循环布局允许负数。</summary>
-        /// <param name="offset">Canvas UI 像素偏移。</param>
-        /// <param name="animation">动画时长。</param>
-        public void ScrollToOffset(float offset, ScrollAnimation animation = default)
+        /// <summary>定位逻辑偏移；有限列表自动钳制，循环布局允许负数，等待和取消语义与索引定位一致。</summary>
+        /// <param name="offset">有限 Canvas UI 像素偏移；无效值同步报错且保留旧请求。</param>
+        /// <param name="animation">默认立即；非有限时长同步报错。</param>
+        /// <param name="onFinished">完成或取消通知一次；IsAnimating 不代表请求已经结束。</param>
+        public void ScrollToOffset(float offset, ScrollAnimation animation = default, Action<ScrollResult> onFinished = null)
         {
             if (!Finite(offset)) throw new ArgumentOutOfRangeException(nameof(offset));
-            CancelAnimation(); ScrollRect.StopMovement();
-            if (animation.Duration <= 0) { SetOffset(offset); dirty = true; if (isActiveAndEnabled) Reconcile(); }
-            else { animationFrom = Offset; animationTo = looping ? offset : Mathf.Clamp(offset, 0, MaxOffset); animationTime = 0; animationDuration = animation.Duration; }
+            ValidateAnimation(animation);
+            Initialize();
+            BeginScroll(-1, default, 0, offset, animation.Duration, onFinished);
         }
-        public void CancelAnimation() { animationDuration = 0; alignedKey = null; }
+        private static void ValidateAnimation(ScrollAnimation animation)
+        {
+            if (!Finite(animation.Duration)) throw new ArgumentOutOfRangeException(nameof(animation));
+        }
+        private bool HasViewport => ScrollRect.viewport != null && ScrollRect.viewport.rect.width > 0 && ScrollRect.viewport.rect.height > 0;
+        private float RequestTarget => ClampOffset(scrollIndex >= 0 ? TargetOffset(scrollIndex, scrollAlignment) - scrollOffsetPixels : scrollOffset);
+        private float ClampOffset(float value) => looping ? value : Mathf.Clamp(value, 0, MaxOffset);
+        private void BeginScroll(int index, ScrollAlignment alignment, float offsetPixels, float offset, float duration, Action<ScrollResult> callback)
+        {
+            if (destroying) throw new InvalidOperationException("销毁中的列表不能接收定位请求。");
+            scrollOperationDepth++;
+            try
+            {
+                EndScroll(ScrollCancelReason.Replaced);
+                hasScrollRequest = true; scrollPending = true;
+                scrollIndex = index; scrollAlignment = alignment; scrollOffsetPixels = offsetPixels;
+                scrollOffset = offset; scrollDuration = duration; scrollFinished = callback;
+                followEndDuringMeasurement = false;
+                if (isActiveAndEnabled && HasViewport && !reconciling && !committing && !handlingCellCallbacks)
+                {
+                    UpdateViewport();
+                    StartScroll();
+                    if (dirty) Reconcile();
+                    TryCompleteScroll();
+                }
+            }
+            finally { scrollOperationDepth--; NotifyScroll(); }
+        }
+        private void StartScroll()
+        {
+            scrollPending = false; scrollStartedFrame = Time.frameCount;
+            // 启用后业务可能在首个 LateUpdate 前定位，旧重填锚点不能随后覆盖新定位。
+            pendingOptions = null;
+            alignedKey = null;
+            ScrollRect.StopMovement();
+            animationFrom = Offset; animationTo = RequestTarget; animationTime = 0;
+            animationDuration = Mathf.Max(0, scrollDuration);
+            if (!IsAnimating) SetOffset(animationTo);
+        }
+        /// 取消当前定位，包括等待执行的请求；保留当前位置，无请求时无操作。
+        public void CancelAnimation()
+        {
+            EndScroll(ScrollCancelReason.ExplicitCancel);
+            NotifyScroll();
+        }
+        private void EndScroll(ScrollCancelReason reason)
+        {
+            if (!hasScrollRequest) return;
+            var callback = scrollFinished;
+            // 先彻底解除旧状态，再排队通知；通知重入产生的新请求不会被旧请求清理覆盖。
+            hasScrollRequest = false; scrollPending = false; scrollFinished = null;
+            animationDuration = 0; alignedKey = null; followEndDuringMeasurement = false;
+            if (callback != null) scrollNotifications.Add(new ScrollNotification { Callback = callback,
+                Result = new ScrollResult(reason == ScrollCancelReason.None ? ScrollStatus.Completed : ScrollStatus.Canceled, reason) });
+        }
+        private void TryCompleteScroll()
+        {
+            if (!hasScrollRequest || scrollPending || IsAnimating || reconciling || committing || handlingCellCallbacks) return;
+            if (!isActiveAndEnabled) { EndScroll(ScrollCancelReason.Disabled); return; }
+            if (!HasViewport) { EndScroll(ScrollCancelReason.ViewportUnavailable); return; }
+            if (dirty || ScrollRect.viewport.rect.size != viewportSize || (dynamicSize && Time.frameCount <= scrollStartedFrame)) return;
+            if (Mathf.Abs(Offset - RequestTarget) > 1) { SetOffset(RequestTarget); return; }
+            EndScroll(ScrollCancelReason.None);
+        }
+        private void NotifyScroll()
+        {
+            if (scrollOperationDepth > 0 || reconciling || committing || handlingCellCallbacks || notifyingScroll || scrollNotifications.Count == 0) return;
+            notifyingScroll = true;
+            try
+            {
+                for (var i = 0; i < scrollNotifications.Count; i++)
+                {
+                    var notification = scrollNotifications[i]; scrollNotifications[i] = default;
+                    try { notification.Callback(notification.Result); }
+                    catch (Exception exception) { Debug.LogException(exception, this); }
+                }
+            }
+            finally { scrollNotifications.Clear(); notifyingScroll = false; }
+        }
         private float TargetOffset(int index, ScrollAlignment alignment)
         {
             var start = ItemStart(index);
@@ -419,6 +524,34 @@ namespace SleepyStudios.LoopScroll
         private void LateUpdate()
         {
             if (!initialized) return;
+            scrollOperationDepth++;
+            try
+            {
+                if (hasScrollRequest && !scrollPending && !HasViewport) EndScroll(ScrollCancelReason.ViewportUnavailable);
+                UpdateViewport();
+                if (!HasViewport) return;
+                if (pendingOptions.HasValue)
+                {
+                    var options = pendingOptions.Value; pendingOptions = null;
+                    if (options.Index.HasValue && options.Index.Value < Count) SetOffset(TargetOffset(options.Index.Value, options.Alignment));
+                    else if (options.AnchorPolicy == ScrollAnchorPolicy.StickToEnd) SetOffset(MaxOffset);
+                }
+                if (hasScrollRequest && scrollPending) StartScroll();
+                if (animationDuration > 0)
+                {
+                    animationTo = RequestTarget;
+                    animationTime += Time.unscaledDeltaTime;
+                    SetOffset(Mathf.Lerp(animationFrom, animationTo, Mathf.SmoothStep(0, 1, animationTime / animationDuration)));
+                    if (animationTime >= animationDuration) animationDuration = 0;
+                }
+                if (dirty) Reconcile();
+                TryCompleteScroll();
+            }
+            finally { scrollOperationDepth--; NotifyScroll(); }
+        }
+        private void UpdateViewport()
+        {
+            if (ScrollRect.viewport == null) return;
             var nextSize = ScrollRect.viewport.rect.size;
             if (nextSize != viewportSize)
             {
@@ -431,21 +564,12 @@ namespace SleepyStudios.LoopScroll
                     for (var i = 0; i < Count; i++) sizes.Set(i, Mathf.Max(1, source.GetEstimatedSize(i, CrossSize)) + AxisSpacing);
                     foreach (var pair in active) pair.Value.Measured = false;
                 }
-                UpdateContentSize(); RestoreAnchor(anchor, ScrollAnchorPolicy.KeepFirstVisible); dirty = true;
+                UpdateContentSize();
+                RestoreAnchor(anchor, ScrollAnchorPolicy.KeepFirstVisible);
+                if (hasScrollRequest && !scrollPending)
+                { animationTo = RequestTarget; if (!IsAnimating) SetOffset(animationTo); }
+                dirty = true;
             }
-            if (pendingOptions.HasValue && ViewportLength > 0)
-            {
-                var options = pendingOptions.Value; pendingOptions = null;
-                if (options.Index.HasValue && options.Index.Value < Count) SetOffset(TargetOffset(options.Index.Value, options.Alignment));
-                else if (options.AnchorPolicy == ScrollAnchorPolicy.StickToEnd) SetOffset(MaxOffset);
-            }
-            if (animationDuration > 0)
-            {
-                animationTime += Time.unscaledDeltaTime;
-                SetOffset(Mathf.Lerp(animationFrom, animationTo, Mathf.SmoothStep(0, 1, animationTime / animationDuration)));
-                if (animationTime >= animationDuration) animationDuration = 0;
-            }
-            if (dirty) Reconcile();
         }
 
         private void UpdateContentSize()
@@ -455,11 +579,16 @@ namespace SleepyStudios.LoopScroll
                 : new Vector2(looping ? loopPageSize * Mathf.Max(1, Count) : ContentLength, CrossSize);
         }
         private void OnScroll(Vector2 position) { dirty = true; ScrollPositionChanged?.Invoke(); }
-        private void HandleClick(LoopCell cell, CellBindContext context) { if (context.IsCurrent) CellClicked?.Invoke(cell, context); }
+        private void HandleClick(LoopCell cell, CellBindContext context)
+        {
+            scrollOperationDepth++;
+            try { if (context.IsCurrent) CellClicked?.Invoke(cell, context); }
+            finally { scrollOperationDepth--; NotifyScroll(); }
+        }
 
         private void Reconcile()
         {
-            if (reconciling || committing || handlingCellCallbacks || !initialized || !isActiveAndEnabled || ViewportLength <= 0 || CrossSize <= 0) return;
+            if (reconciling || committing || handlingCellCallbacks || !initialized || !isActiveAndEnabled || !HasViewport || ViewportLength <= 0 || CrossSize <= 0) return;
             reconciling = true;
             try
             {
@@ -512,9 +641,9 @@ namespace SleepyStudios.LoopScroll
                     if (dynamicSize && (!cell.Measured || invalidSizes.Contains(index))) dirty = true;
                 }
                 if (dynamicSize) MeasureActive();
-                if (!dirty && !IsAnimating) alignedKey = null;
+                if (!dirty && !IsAnimating && !hasScrollRequest) alignedKey = null;
             }
-            finally { reconciling = false; }
+            finally { reconciling = false; TryCompleteScroll(); NotifyScroll(); }
         }
         private void Position(LoopCell cell, int index, int slot)
         {
@@ -548,7 +677,12 @@ namespace SleepyStudios.LoopScroll
             if (changed)
             {
                 UpdateContentSize();
-                if (alignedKey != null && indices.TryGetValue(alignedKey, out var targetIndex))
+                if (hasScrollRequest && !scrollPending)
+                {
+                    animationTo = RequestTarget;
+                    if (!IsAnimating) SetOffset(animationTo);
+                }
+                else if (alignedKey != null && indices.TryGetValue(alignedKey, out var targetIndex))
                 {
                     var target = TargetOffset(targetIndex, alignedAlignment);
                     if (IsAnimating) animationTo = Mathf.Clamp(target, 0, MaxOffset); else SetOffset(target);
@@ -620,18 +754,41 @@ namespace SleepyStudios.LoopScroll
         }
         /// <summary>拖动开始时取消定位动画。</summary>
         /// <param name="eventData">Unity 指针事件。</param>
-        public void OnBeginDrag(PointerEventData eventData) { IsDragging = true; currentDrag = eventData; CancelAnimation(); followEndDuringMeasurement = false; DragStarted?.Invoke(); }
+        public void OnBeginDrag(PointerEventData eventData)
+        {
+            scrollOperationDepth++;
+            try { IsDragging = true; currentDrag = eventData; EndScroll(ScrollCancelReason.DragStarted); alignedKey = null; followEndDuringMeasurement = false; DragStarted?.Invoke(); }
+            finally { scrollOperationDepth--; NotifyScroll(); }
+        }
         /// <summary>结束拖动并通知扩展组件。</summary>
         /// <param name="eventData">Unity 指针事件。</param>
         public void OnEndDrag(PointerEventData eventData) { IsDragging = false; currentDrag = null; followEndDuringMeasurement = DistanceToEnd <= 1; DragEnded?.Invoke(); }
         private void OnEnable() { dirty = true; }
-        private void OnDisable() { IsDragging = false; currentDrag = null; CancelAnimation(); if (initialized) RecycleAll(); VisibleRange = VisibleRange.Empty; }
+        private void OnDisable()
+        {
+            scrollOperationDepth++;
+            try
+            {
+                IsDragging = false; currentDrag = null;
+                if (!scrollPending) EndScroll(ScrollCancelReason.Disabled);
+                alignedKey = null;
+                if (initialized) RecycleAll(); VisibleRange = VisibleRange.Empty;
+            }
+            finally { scrollOperationDepth--; NotifyScroll(); }
+        }
         private void OnDestroy()
         {
-            if (!initialized) return;
-            ScrollRect.onValueChanged.RemoveListener(OnScroll); RecycleAll();
-            if (poolRoot != null) { if (Application.isPlaying) Destroy(poolRoot.gameObject); else DestroyImmediate(poolRoot.gameObject); }
-            pools.Clear(); measuredSizes.Clear(); source = null;
+            destroying = true;
+            scrollOperationDepth++;
+            try
+            {
+                EndScroll(ScrollCancelReason.Destroyed);
+                if (!initialized) return;
+                ScrollRect.onValueChanged.RemoveListener(OnScroll); RecycleAll();
+                if (poolRoot != null) { if (Application.isPlaying) Destroy(poolRoot.gameObject); else DestroyImmediate(poolRoot.gameObject); }
+                pools.Clear(); measuredSizes.Clear(); source = null;
+            }
+            finally { scrollOperationDepth--; NotifyScroll(); }
         }
         internal static int Mod(int value, int count) => ((value % count) + count) % count;
         private static bool Finite(float value) => !float.IsNaN(value) && !float.IsInfinity(value);

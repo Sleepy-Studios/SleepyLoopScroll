@@ -17,6 +17,7 @@
 
 ```csharp
 using SleepyStudios.LoopScroll;
+using UnityEngine;
 using UnityEngine.UI;
 
 // 先注册一次，再提交调用方维护的 List；Prefab 包含 Text 和 LoopCell。
@@ -24,10 +25,14 @@ list.RegisterCellBinding<Text>((cell, index, context) => cell.text = items[index
 list.SetTotalCount(items, getItemKey: item => ((ItemData)item).Id.ToString());
 list.RefreshCells(); // 重新绑定活跃项
 list.RefillCells(new RefillOptions(20, ScrollAlignment.Center)); // 完整重填并定位
-list.ScrollToCell(20, ScrollAlignment.Center, new ScrollAnimation(.2f));
+list.ScrollToCell(20, ScrollAlignment.Center, new ScrollAnimation(.2f), offsetPixels: 40,
+    onFinished: result => Debug.Log($"{result.Status}: {result.CancelReason}"));
+list.CancelAnimation(); // 当前定位或等待请求只报告一次 Canceled/ExplicitCancel
 ```
 
 `SetTotalCount` 接受真实 IList，null 清空；每次完整重填，默认起点。Key 使用唯一稳定业务 ID，不能依赖显示语言。集合修改后用 ApplyChanges、Append/Prepend 或 RefillCells 通知列表；RefreshCells 不更新数量。多类型、动态估算通过 SetDataSource 提交。
+
+定位偏移为 Canvas UI 像素，最终位置 = 对齐位置 - offsetPixels，再钳制。正值向下/右，默认 0 保持现有行为。完成回调等待当前布局稳定；取消原因包括替代、拖动、手动取消、数据更新、禁用、销毁及零尺寸。inactive/零尺寸提交暂存原请求，恢复后执行。IsAnimating 仅表示插值动画状态；完整契约见 API Reference。
 
 ## 示例与文档
 

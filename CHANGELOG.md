@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — 定位请求完成、取消与像素偏移
+
+- 直接扩展 ScrollToCell 的 offsetPixels/onFinished 和 ScrollToOffset 的 onFinished；只读 ScrollResult 报告唯一完成/取消结果。
+- 暂存 inactive/零尺寸定位并保留原动画时长；统一替代、拖动、手动、成功数据更新、禁用、销毁和零尺寸取消。
+- 动态测量和 Viewport 变化保留偏移；最终 reconcile 稳定后通知，支持回调重入和异常恢复。
+- 宿主 MvcBind 示例增加 ±60 UI 像素定位、手动取消与完成/拖动取消状态；无回调路径沿用值字段和复用通知容器。
+- 新增直接相关生命周期/偏移回归并重跑双版本 Test Runner、60 秒同步零分配和宿主示例；实测结果见 UnifiedValidation。
+
 ## Unreleased — 示例与 API 易用性
 
 - 一个 Showcase 导入入口，五个可导航场景及返回按钮；Editor 不依赖 Build Settings。
