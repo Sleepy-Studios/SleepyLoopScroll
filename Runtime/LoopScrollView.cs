@@ -91,6 +91,8 @@ namespace SleepyStudios.LoopScroll
         public ScrollRect ScrollRect => scrollRect != null ? scrollRect : (scrollRect = GetComponent<ScrollRect>());
         public bool IsVertical => layout == LoopLayout.Vertical || layout == LoopLayout.VerticalGrid;
         public bool IsGrid => layout == LoopLayout.VerticalGrid || layout == LoopLayout.HorizontalGrid;
+        /// 当前布局的横向槽位数；垂直 Grid 为列数，水平 Grid 为行数，普通列表为 1。
+        public int LayoutLaneCount => IsGrid ? Lanes : 1;
         public bool HasStableKeys => source != null && source.HasStableKeys;
         public bool IsDragging { get; private set; }
         /// 仅表示插值动画正在运行；等待执行和布局收敛通过定位回调判断结束。

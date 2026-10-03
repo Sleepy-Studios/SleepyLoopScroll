@@ -2,6 +2,8 @@
 
 ## Unreleased — 定位请求完成、取消与像素偏移
 
+- 增加只读 LayoutLaneCount，供宿主菜单导航读取真实 Grid 行/列数，避免残缺末行推算错误。
+
 - 直接扩展 ScrollToCell 的 offsetPixels/onFinished 和 ScrollToOffset 的 onFinished；只读 ScrollResult 报告唯一完成/取消结果。
 - 暂存 inactive/零尺寸定位并保留原动画时长；统一替代、拖动、手动、成功数据更新、禁用、销毁和零尺寸取消。
 - 动态测量和 Viewport 变化保留偏移；最终 reconcile 稳定后通知，支持回调重入和异常恢复。
