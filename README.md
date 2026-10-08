@@ -49,4 +49,4 @@ Editor 菜单 `Tools/Sleepy Loop Scroll/Open Showcase` 打开主页；`Build Imp
 - [当前验收记录](Documentation~/UnifiedValidation.md)。
 - [Architecture](Documentation~/Architecture.md)、[Performance](Documentation~/Performance.md)、[Release Checklist](Documentation~/ReleaseChecklist.md)。
 
-私有阶段不授予开源许可。实现独立设计，不包含付费插件源码。
+当前不授予开源许可。实现独立设计，不包含付费插件源码。

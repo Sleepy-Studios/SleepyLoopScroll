@@ -1,5 +1,17 @@
 # Loop Scroll 验收记录
 
+## v0.1.0 公开远端包导入（2026-10-08）
+
+包仓库与 SleepyDemos 均归属 Sleepy-Studios，公开性均为 public；已验证匿名读取 v0.1.0 标签。宿主 manifest 使用该版本标签，Unity 自动生成 Git lock 并从 PackageCache 加载，正式编译 0 错误、0 警告，测试后 Console Error/Exception 为 0。
+
+| 宿主直接相关测试 | Unity 6000.3.15f1 |
+|---|---|
+| LoopScrollUIBindGenerationTests（EditMode） | 3/3 |
+| LoopScrollItemViewBridgeTests（PlayMode） | 7/7 |
+| LoopScrollShowcaseTests（PlayMode） | 8/8 |
+
+本轮合计 18/18，通过后恢复 AppEntrance 场景并退出 Play Mode。未执行全量测试，未重新运行包自身测试、独立 Player 或人工触屏/手柄视觉验收；包运行时代码未修改。
+
 ## 定位请求完成、取消与像素偏移（2026-10-01）
 
 本轮在包基线 2a048b2 / codex/v0.1-implementation 和宿主 011bd9e / main 上完成实现与验证；用户随后授权本地 Git 提交。直接扩展 ScrollToCell 的 offsetPixels/onFinished 和 ScrollToOffset 的 onFinished，新增只读 ScrollResult；没有兼容重载、Task/CTS 请求包装或发布操作。
