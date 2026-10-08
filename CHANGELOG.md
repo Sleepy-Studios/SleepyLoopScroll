@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased — 定位请求完成、取消与像素偏移
+## 0.1.0 — 2026-10-08
+
+### 定位请求完成、取消与像素偏移
 
 - 增加只读 LayoutLaneCount，供宿主菜单导航读取真实 Grid 行/列数，避免残缺末行推算错误。
 
@@ -10,14 +12,14 @@
 - 宿主 MvcBind 示例增加 ±60 UI 像素定位、手动取消与完成/拖动取消状态；无回调路径沿用值字段和复用通知容器。
 - 新增直接相关生命周期/偏移回归并重跑双版本 Test Runner、60 秒同步零分配和宿主示例；实测结果见 UnifiedValidation。
 
-## Unreleased — 示例与 API 易用性
+### 示例与 API 易用性
 
 - 一个 Showcase 导入入口，五个可导航场景及返回按钮；Editor 不依赖 Build Settings。
 - 首次中文、持久化中英文切换、稳定 ID 数据与独立 Noto Sans SC 字体。
 - 统一 RegisterCellBinding 后 SetTotalCount；操作入口为 RefreshCells、RefillCells(RefillOptions)、ScrollToCell。
 - 删除平行方法与重复简单数据源；保留稳定锚点、异步隔离和高级 DataSource。宿主仅三种带 context 的注册与 MvcBind 回调。
 
-## 0.1.0 — 2026-10-01 本地实现，尚未发布
+### 虚拟列表基础
 
 - 原生 ScrollRect 组合的虚拟 List、固定 Grid、类型独立对象池。
 - 动态尺寸 Fenwick 索引、稳定 Key 锚点与集合变更通知。

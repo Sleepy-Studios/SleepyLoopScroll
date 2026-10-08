@@ -4,9 +4,9 @@
 
 ## 安装
 
-Package Manager → Add package from git URL，输入 `https://github.com/Sleepy-Studios/SleepyLoopScroll.git#codex/v0.1-implementation`。宿主项目在 `Packages/manifest.json` 中使用完整提交 SHA 固定版本，并提交 `Packages/packages-lock.json`，保证团队拉取同一份代码。
+Package Manager → Add package from git URL，输入 `https://github.com/Sleepy-Studios/SleepyLoopScroll.git#v0.1.0`。宿主项目使用发布标签固定版本，并提交 `Packages/packages-lock.json`；lock 中的提交哈希由 Unity 记录，保证团队拉取同一份代码。
 
-仓库归属 `Sleepy-Studios`，保持私有；同事需使用具有组织仓库读取权限的 GitHub 账号，并为本机 Git 配置 HTTPS 凭据。可先用 `git ls-remote https://github.com/Sleepy-Studios/SleepyLoopScroll.git` 检查访问。仅修改包源码时，才将宿主依赖临时切换到仓库根目录 `package.json` 的本地包；日常协作使用远端包。
+仓库归属 `Sleepy-Studios`，与 SleepyDemos 一样公开；安装和拉取无需 GitHub 登录或额外权限。仅修改包源码时，才将宿主依赖临时切换到仓库根目录 `package.json` 的本地包；日常协作使用远端包。后续版本新增对应的 `v` 标签，已发布标签保持不变。
 
 ## 五分钟开始
 
