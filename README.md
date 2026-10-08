@@ -4,9 +4,9 @@
 
 ## 安装
 
-开发：Package Manager → Add package from disk，选择仓库根目录 `package.json`。仓库应放在宿主之外，由本地 Git 独立维护。
+Package Manager → Add package from git URL，输入 `https://github.com/Sleepy-Studios/SleepyLoopScroll.git#codex/v0.1-implementation`。宿主项目在 `Packages/manifest.json` 中使用完整提交 SHA 固定版本，并提交 `Packages/packages-lock.json`，保证团队拉取同一份代码。
 
-初始开发基线已推送至私有仓库 `Sleepy-Studios/SleepyLoopScroll` 的 `codex/v0.1-implementation` 分支。正式发布后可使用 `https://github.com/Sleepy-Studios/SleepyLoopScroll.git#v0.1.0`；目前尚无该标签。私有仓库需要本机 Git 访问权限。
+仓库归属 `Sleepy-Studios`，保持私有；同事需使用具有组织仓库读取权限的 GitHub 账号，并为本机 Git 配置 HTTPS 凭据。可先用 `git ls-remote https://github.com/Sleepy-Studios/SleepyLoopScroll.git` 检查访问。仅修改包源码时，才将宿主依赖临时切换到仓库根目录 `package.json` 的本地包；日常协作使用远端包。
 
 ## 五分钟开始
 
